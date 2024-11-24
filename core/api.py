@@ -1,34 +1,39 @@
-import uuid
-from bson import ObjectId
-from bson.errors import InvalidId
-from fastapi import FastAPI, HTTPException, Depends, Header, Request, status
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from typing import Dict, Any, List, Optional, Annotated, Union
-from pydantic import BaseModel, Field
-import jwt
-import os
+import json
 from datetime import datetime, UTC
-import logging
+from typing import List, Union, Dict, Set
+from fastapi import (
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Depends,
+    Header,
+    APIRouter,
+    UploadFile
+)
+from fastapi.middleware.cors import CORSMiddleware
+import jwt
 
-from pymongo import MongoClient
-from .vector_store.mongo_vector_store import MongoDBAtlasVectorStore
-from .embedding_model.openai_embedding_model import OpenAIEmbeddingModel
-from .parser.unstructured_parser import UnstructuredAPIParser
-from .planner.simple_planner import SimpleRAGPlanner
-from .document import DocumentChunk, Permission, Source, SystemMetadata, AuthContext, AuthType
-from .utils.aws_utils import get_s3_client, upload_from_encoded_string, create_presigned_url
+from core.models.request import IngestTextRequest, QueryRequest
+from core.models.documents import (
+    Document,
+    DocumentResult,
+    ChunkResult,
+    EntityType
+)
+from core.models.auth import AuthContext
+from core.services.document_service import DocumentService
+from core.config import get_settings
+from core.database.mongo_database import MongoDatabase
+from core.vector_store.mongo_vector_store import MongoDBAtlasVectorStore
+from core.storage.s3_storage import S3Storage
+from core.parser.unstructured_parser import UnstructuredAPIParser
+from core.embedding_model.openai_embedding_model import OpenAIEmbeddingModel
+from core.services.uri_service import get_uri_service
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 # Initialize FastAPI app
-app = FastAPI(
-    title="DataBridge API",
-    description="REST API for DataBridge document ingestion and querying",
-    version="1.0.0"
-)
+app = FastAPI(title="DataBridge API")
 
 # Add CORS middleware
 app.add_middleware(
@@ -36,391 +41,205 @@ app.add_middleware(
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["*"]
+)
+
+# Initialize service
+settings = get_settings()
+
+# Initialize components
+database = MongoDatabase(
+    **settings.get_mongodb_settings()
+)
+
+vector_store = MongoDBAtlasVectorStore(
+    settings.MONGODB_URI,
+    settings.DATABRIDGE_DB,
+    "document_chunks",
+    "vector_index"
+)
+
+storage = S3Storage(
+    **settings.get_storage_settings()
+)
+
+parser = UnstructuredAPIParser(
+    api_key=settings.UNSTRUCTURED_API_KEY,
+    chunk_size=settings.CHUNK_SIZE,
+    chunk_overlap=settings.CHUNK_OVERLAP
+)
+
+embedding_model = OpenAIEmbeddingModel(
+    api_key=settings.OPENAI_API_KEY,
+    model_name=settings.EMBEDDING_MODEL
+)
+
+# Initialize document service
+document_service = DocumentService(
+    database=database,
+    vector_store=vector_store,
+    storage=storage,
+    parser=parser,
+    embedding_model=embedding_model
 )
 
 
-class DataBridgeException(HTTPException):
-    def __init__(self, detail: str, status_code: int = 400):
-        super().__init__(status_code=status_code, detail=detail)
-
-
-class AuthenticationError(DataBridgeException):
-    def __init__(self, detail: str = "Authentication failed"):
-        super().__init__(detail=detail, status_code=status.HTTP_401_UNAUTHORIZED)
-
-
-class ServiceConfig:
-    """Service-wide configuration and component management"""
-    def __init__(self):
-        self.jwt_secret = os.getenv("JWT_SECRET_KEY")
-        if not self.jwt_secret:
-            raise ValueError("JWT_SECRET_KEY environment variable not set")
-
-        # Required environment variables
-        required_vars = {
-            "MONGODB_URI": "MongoDB connection string",
-            "OPENAI_API_KEY": "OpenAI API key",
-            "UNSTRUCTURED_API_KEY": "Unstructured API key"
-        }
-
-        missing = [f"{var} ({desc})" for var, desc in required_vars.items() if not os.getenv(var)]
-        if missing:
-            raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
-
-        # Initialize core components
-        self._init_components()
-
-    def _init_components(self):
-        """Initialize service components"""
-        try:
-            self.database = MongoClient(os.getenv("MONGODB_URI")).get_database(os.getenv("DB_NAME", "DataBridgeTest")).get_collection(os.getenv("COLLECTION_NAME", "test"))
-            self.vector_store = MongoDBAtlasVectorStore(
-                connection_string=os.getenv("MONGODB_URI"),
-                database_name=os.getenv("DB_NAME", "DataBridgeTest"),
-                collection_name=os.getenv("COLLECTION_NAME", "test")
-            )
-
-            self.embedding_model = OpenAIEmbeddingModel(
-                api_key=os.getenv("OPENAI_API_KEY"),
-                model_name=os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
-            )
-
-            self.parser = UnstructuredAPIParser(
-                api_key=os.getenv("UNSTRUCTURED_API_KEY"),
-                chunk_size=int(os.getenv("CHUNK_SIZE", "1000")),
-                chunk_overlap=int(os.getenv("CHUNK_OVERLAP", "200"))
-            )
-
-            self.planner = SimpleRAGPlanner(
-                default_k=int(os.getenv("DEFAULT_K", "4"))
-            )
-        except Exception as e:
-            raise ValueError(f"Failed to initialize components: {str(e)}")
-
-    async def verify_token(self, token: str, owner_id: str) -> AuthContext:
-        """Verify JWT token and return auth context"""
-        try:
-            payload = jwt.decode(token, self.jwt_secret, algorithms=["HS256"])
-            
-            if datetime.fromtimestamp(payload["exp"], UTC) < datetime.now(UTC):
-                raise AuthenticationError("Token has expired")
-
-            # Check if this is a developer token
-            if "." in owner_id:  # dev_id.app_id format
-                dev_id, app_id = owner_id.split(".")
-                return AuthContext(
-                    type=AuthType.DEVELOPER,
-                    dev_id=dev_id,
-                    app_id=app_id
-                )
-            else:  # User token
-                return AuthContext(
-                    type=AuthType.USER,
-                    eu_id=owner_id
-                )
-
-        except jwt.InvalidTokenError:
-            raise AuthenticationError("Invalid token")
-        except Exception as e:
-            raise AuthenticationError(f"Authentication failed: {str(e)}")
-
-
-# Initialize service
-service = ServiceConfig()
-
-
-# Request/Response Models
-class Document(BaseModel):
-    id: str
-    name: str
-    type: str
-    source: str
-    uploaded_at: str
-    size: str
-    redaction_level: str
-    stats: Dict[str, Union[int, str]] = Field(
-        default_factory=lambda: {
-            "ai_queries": 0,
-            "time_saved": "0h",
-            "last_accessed": ""
-        }
-    )
-    accessed_by: List[Dict[str, str]] = Field(default_factory=list)
-    sensitive_content: Optional[List[str]] = None
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-    s3_bucket: Optional[str] = None
-    s3_key: Optional[str] = None
-    presigned_url: Optional[str] = None
-
-    @classmethod
-    def from_mongo(cls, data: Dict[str, Any]) -> "Document":
-        """Create from MongoDB document"""
-        # Convert MongoDB document to Document model
-        s3_key = data.get("system_metadata", {}).get("s3_key")
-        s3_bucket = data.get("system_metadata", {}).get("s3_bucket")
-        presigned_url = create_presigned_url(get_s3_client(), s3_bucket, s3_key)
-        return cls(
-            id=str(data.get("_id")),
-            name=data.get("system_metadata", {}).get("filename") or "Untitled",
-            type="document", # Default type for now
-            source=data.get("source"),
-            uploaded_at=str(data.get("_id").generation_time), # MongoDB ObjectId contains timestamp
-            size="N/A", # Size not stored currently
-            redaction_level="none", # Default redaction level
-            stats={
-                "ai_queries": 0,
-                "time_saved": "0h", 
-                "last_accessed": ""
-            },
-            accessed_by=[],
-            metadata=data.get("metadata", {}),
-            s3_bucket=s3_bucket,
-            s3_key=s3_key,
-            presigned_url=presigned_url
+async def verify_token(authorization: str = Header(None)) -> AuthContext:
+    """Verify JWT Bearer token."""
+    if not authorization:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing authorization header",
+            headers={"WWW-Authenticate": "Bearer"}
         )
-
-
-class IngestRequest(BaseModel):
-    content: str = Field(..., description="Document content (text or base64)")
-    metadata: Dict[str, Any] = Field(default_factory=dict, description="Document metadata")
-    eu_id: Optional[str] = Field(None, description="End user ID when developer ingests for user")
-
-
-class QueryRequest(BaseModel):
-    query: str = Field(..., description="Query string")
-    k: Optional[int] = Field(default=4, description="Number of results to return")
-    filters: Optional[Dict[str, Any]] = Field(default=None, 
-                                            description="Optional metadata filters")
-
-
-class IngestResponse(BaseModel):
-    document_id: str = Field(..., description="Ingested document ID")
-    message: str = Field(default="Document ingested successfully")
-
-
-class QueryResponse(BaseModel):
-    results: List[Dict[str, Any]] = Field(..., description="Query results")
-    total_results: int = Field(..., description="Total number of results")
-
-
-# Authentication dependency
-async def verify_auth(
-    owner_id: Annotated[str, Header(alias="X-Owner-ID")],
-    auth_token: Annotated[str, Header(alias="X-Auth-Token")]
-) -> str:
-    """Verify authentication headers"""
-    return await service.verify_token(auth_token, owner_id)
-
-
-# Error handler middleware
-@app.middleware("http")
-async def error_handler(request: Request, call_next):
     try:
-        return await call_next(request)
-    except DataBridgeException as e:
-        return JSONResponse(
-            status_code=e.status_code,
-            content={"error": e.detail}
+        if not authorization.startswith("Bearer "):
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid authorization header"
+            )
+        
+        token = authorization[7:]  # Remove "Bearer "
+        payload = jwt.decode(
+            token,
+            settings.JWT_SECRET_KEY,
+            algorithms=[settings.JWT_ALGORITHM]
         )
+        
+        if datetime.fromtimestamp(payload["exp"], UTC) < datetime.now(UTC):
+            raise HTTPException(status_code=401, detail="Token expired")
+
+        return AuthContext(
+            entity_type=EntityType(payload["type"]),
+            entity_id=payload["entity_id"],
+            app_id=payload.get("app_id"),
+            permissions=set(payload.get("permissions", ["read"]))
+        )
+    except jwt.InvalidTokenError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+
+
+@app.post("/documents/text", response_model=Document)
+async def ingest_text(
+    request: IngestTextRequest,
+    auth: AuthContext = Depends(verify_token)
+) -> Document:
+    """Ingest a text document."""
+    try:
+        return await document_service.ingest_text(request, auth)
     except Exception as e:
-        logger.exception("Unexpected error")
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"error": "Internal server error"}
-        )
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/documents/file", response_model=Document)
+async def ingest_file(
+    file: UploadFile = File(...),
+    metadata: str = Form("{}"),  # JSON string of metadata
+    auth: AuthContext = Depends(verify_token)
+) -> Document:
+    """Ingest a file document."""
+    try:
+        metadata_dict = json.loads(metadata)
+        return await document_service.ingest_file(file, metadata_dict, auth)
+    except json.JSONDecodeError:
+        raise HTTPException(400, "Invalid metadata JSON")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/query", response_model=Union[List[ChunkResult], List[DocumentResult]])
+async def query_documents(
+    request: QueryRequest,
+    auth: AuthContext = Depends(verify_token)
+):
+    """Query documents with specified return type."""
+    try:
+        return await document_service.query(request, auth)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.get("/documents", response_model=List[Document])
-async def get_documents(auth: AuthContext = Depends(verify_auth)) -> List[Document]:
-    """Get all document files. Content ingested as string will have an empty presigned url field."""
-    match_stage = {
-        "$match": {
-            "$or": [
-                {"system_metadata.dev_id": auth.dev_id},  # Dev's own docs
-                {"permissions": {"$in": [auth.app_id]}}  # Docs app has access to
-            ]
-        } if auth.type == AuthType.DEVELOPER else {"system_metadata.eu_id": auth.eu_id}
-    }
-
-    pipeline = [
-        match_stage,
-        {
-            "$group": {
-                "_id": "$system_metadata.s3_key",
-                "doc": {"$first": "$$ROOT"}
-            }
-        },
-        {
-            "$replaceRoot": {"newRoot": "$doc"}
-        }
-    ]
-
-    documents = list(service.database.aggregate(pipeline))
-    return [Document.from_mongo(doc) for doc in documents]
-
-
-@app.get("/document/{doc_id}", response_model=Document)
-async def get_document_by_id(
-    doc_id: str,
-    auth: AuthContext = Depends(verify_auth)
-) -> Document:
+async def list_documents(
+    auth: AuthContext = Depends(verify_token),
+    skip: int = 0,
+    limit: int = 100
+):
+    """List accessible documents."""
     try:
-        obj_id = ObjectId(doc_id)
-    except InvalidId:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid document ID format"
-        )
-
-    query = {
-        "_id": obj_id,
-        "$or": [
-            {"system_metadata.dev_id": auth.dev_id},
-            {"permissions": {"$in": [auth.app_id]}}
-        ]
-    } if auth.type == AuthType.DEVELOPER else {
-        "_id": obj_id,
-        "system_metadata.eu_id": auth.eu_id
-    }
-
-    # Try to fetch the document
-    document = service.database.find_one(query)
-
-    if not document:
-        raise HTTPException(
-            status_code=404,
-            detail="Document not found or you don't have permission to access it"
-        )
-
-    return Document.from_mongo(document)
-
-
-# TODO: Move to the way brandsync stored embeddings and documents separately - 
-# all the metadata and all info is stored in one collection, and embeddings stored 
-# in another store. (seperation of concerns)
-@app.post("/ingest", response_model=IngestResponse)
-async def ingest_document(
-    request: IngestRequest,
-    auth: AuthContext = Depends(verify_auth)
-) -> IngestResponse:
-    """Ingest a document into DataBridge."""
-    logger.info(f"Ingesting document for {auth.type}")
-
-    # Generate document ID for all chunks.
-    doc_id = str(uuid.uuid4())
-    s3_client = get_s3_client()
-    s3_bucket, s3_key = upload_from_encoded_string(s3_client, request.content, doc_id)
-
-    # Set up system metadata.
-    system_metadata = SystemMetadata(doc_id=doc_id, s3_bucket=s3_bucket, s3_key=s3_key)
-    if request.metadata.get("filename"):
-        system_metadata.filename = request.metadata["filename"]
-    if auth.type == AuthType.DEVELOPER:
-        system_metadata.dev_id = auth.dev_id
-        system_metadata.app_id = auth.app_id
-        if request.eu_id:
-            system_metadata.eu_id = request.eu_id
-    else:
-        system_metadata.eu_id = auth.eu_id
-
-    # Parse into chunks.
-    chunk_texts = service.parser.parse(request.content, request.metadata)
-    embeddings = await service.embedding_model.embed_for_ingestion(chunk_texts)
-
-    # Create chunks.
-    chunks = []
-    for text, embedding in zip(chunk_texts, embeddings):
-        # Set source and permissions based on context.
-        if auth.type == AuthType.DEVELOPER:
-            source = Source.APP
-            permissions = {auth.app_id: {Permission.READ, Permission.WRITE, Permission.DELETE}} if request.eu_id else {}
-        else:
-            source = Source.SELF_UPLOADED
-            permissions = {}
-
-        chunk = DocumentChunk(
-            content=text,
-            embedding=embedding,
-            metadata=request.metadata,
-            system_metadata=system_metadata,
-            source=source,
-            permissions=permissions
-        )
-        chunks.append(chunk)
-
-    # Store in vector store.
-    if not service.vector_store.store_embeddings(chunks):
-        raise DataBridgeException(
-            "Failed to store embeddings",
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
-
-    return IngestResponse(document_id=doc_id)
-
-
-@app.post("/query", response_model=QueryResponse)
-async def query_documents(
-    request: QueryRequest,
-    auth: AuthContext = Depends(verify_auth)
-) -> QueryResponse:
-    """
-    Query documents in DataBridge.
-    All configuration and credentials are handled server-side.
-    """
-    logger.info(f"Processing query for owner {auth.type}")
-    # Create plan
-    plan = service.planner.plan_retrieval(request.query, k=request.k)
-    query_embedding = await service.embedding_model.embed_for_query(request.query)
-
-    # Query vector store
-    chunks = service.vector_store.query_similar(
-        query_embedding,
-        k=plan["k"],
-        auth=auth,
-        filters=request.filters
-    )
-
-    results = [
-        {
-            "content": chunk.content,
-            "doc_id": chunk.system_metadata.doc_id,
-            "score": chunk.score,
-            "metadata": chunk.metadata
-        }
-        for chunk in chunks
-    ]
-
-    return QueryResponse(
-        results=results,
-        total_results=len(results)
-    )
-
-
-# Health check endpoint
-@app.get("/health")
-async def health_check():
-    """Check service health"""
-    try:
-        # Verify MongoDB connection
-        service.vector_store.collection.find_one({})
-        return {"status": "healthy"}
+        return await document_service.db.get_documents(auth, skip, limit)
     except Exception as e:
-        raise DataBridgeException(
-            f"Service unhealthy: {str(e)}", 
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/documents/{document_id}", response_model=Document)
+async def get_document(
+    document_id: str,
+    auth: AuthContext = Depends(verify_token)
+):
+    """Get document by ID."""
+    try:
+        doc = await document_service.db.get_document(document_id, auth)
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found")
+        return doc
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+auth_router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+@auth_router.post("/developer-token")
+async def create_developer_token(
+    dev_id: str,
+    app_id: str = None,
+    expiry_days: int = 30,
+    permissions: Set[str] = None,
+    auth: AuthContext = Depends(verify_token)
+) -> Dict[str, str]:
+    """Create a developer access URI."""
+    # Verify requesting user has admin permissions
+    if "admin" not in auth.permissions:
+        raise HTTPException(
+            status_code=403,
+            detail="Admin permissions required"
         )
 
+    uri_service = get_uri_service()
+    uri = uri_service.create_developer_uri(
+        dev_id=dev_id,
+        app_id=app_id,
+        expiry_days=expiry_days,
+        permissions=permissions
+    )
 
-# Startup and shutdown events
-@app.on_event("startup")
-async def startup_event():
-    """Verify all connections on startup"""
-    logger.info("Starting DataBridge service")
-    await health_check()
+    return {"uri": uri}
 
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Cleanup on shutdown"""
-    logger.info("Shutting down DataBridge service")
+@auth_router.post("/user-token")
+async def create_user_token(
+    user_id: str,
+    expiry_days: int = 30,
+    permissions: Set[str] = None,
+    auth: AuthContext = Depends(verify_token)
+) -> Dict[str, str]:
+    """Create a user access URI."""
+    # Verify requesting user has admin permissions
+    if "admin" not in auth.permissions:
+        raise HTTPException(
+            status_code=403,
+            detail="Admin permissions required"
+        )
+
+    uri_service = get_uri_service()
+    uri = uri_service.create_user_uri(
+        user_id=user_id,
+        expiry_days=expiry_days,
+        permissions=permissions
+    )
+
+    return {"uri": uri}
+
+# Add to your main FastAPI app
+app.include_router(auth_router)

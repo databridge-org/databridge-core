@@ -2,65 +2,66 @@ from typing import Dict, Any, List, Optional, Union
 import httpx
 from urllib.parse import urlparse
 import jwt
-from datetime import datetime, UTC
-import asyncio
-from dataclasses import dataclass
-from .exceptions import AuthenticationError
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 import logging
+import base64
+
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class QueryResult:
-    """Structured query result"""
+class IngestRequest(BaseModel):
+    """Structure for document ingestion"""
     content: str
-    doc_id: str
-    score: Optional[float]
-    metadata: Dict[str, Any]
+    content_type: str
+    metadata: Dict[str, Any] = {}
+    filename: Optional[str] = None
 
-# Request/Response Models
+
 class Document(BaseModel):
-    id: str
-    name: str
-    type: str
-    source: str
-    uploaded_at: str
-    size: str
-    redaction_level: str
-    stats: Dict[str, Union[int, str]] = Field(
-        default_factory=lambda: {
-            "ai_queries": 0,
-            "time_saved": "0h",
-            "last_accessed": ""
-        }
-    )
-    accessed_by: List[Dict[str, str]] = Field(default_factory=list)
-    sensitive_content: Optional[List[str]] = None
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-    s3_bucket: Optional[str] = None
-    s3_key: Optional[str] = None
-    presigned_url: Optional[str] = None
+    """Document metadata model"""
+    external_id: str
+    content_type: str
+    filename: Optional[str] = None
+    metadata: Dict[str, Any] = {}
+    storage_info: Dict[str, str] = {}
+    system_metadata: Dict[str, Any] = {}
+    access_control: Dict[str, Any] = {}
+    chunk_ids: List[str] = []
+
+
+class ChunkResult(BaseModel):
+    """Query result at chunk level"""
+    content: str
+    score: float
+    document_id: str
+    chunk_number: int
+    metadata: Dict[str, Any]
+    content_type: str
+    filename: Optional[str] = None
+    download_url: Optional[str] = None
+
+
+class DocumentResult(BaseModel):
+    """Query result at document level"""
+    score: float
+    document_id: str
+    metadata: Dict[str, Any]
+    content: Dict[str, str]
 
 
 class DataBridge:
     """
-    DataBridge client for document ingestion and querying.
-
+    DataBridge client for document operations.
+    
     Usage:
-        db = DataBridge("databridge://owner123:token@databridge.local")
-        doc_id = await db.ingest_document("content", {"title": "My Doc"})
-        results = await db.query("What is...")
+        async with DataBridge("databridge://owner123:token@databridge.local") as db:
+            doc_id = await db.ingest_document("content", content_type="text/plain")
+            results = await db.query("What is...")
     """
-    def __init__(
-        self,
-        uri: str,
-        timeout: int = 30,
-        max_retries: int = 3
-    ):
+
+    def __init__(self, uri: str, timeout: int = 30):
         self._timeout = timeout
-        self._max_retries = max_retries
         self._client = httpx.AsyncClient(timeout=timeout)
         self._setup_auth(uri)
 
@@ -70,43 +71,38 @@ class DataBridge:
             parsed = urlparse(uri)
             if not parsed.netloc:
                 raise ValueError("Invalid URI format")
-            
+
             split_uri = parsed.netloc.split('@')
-            self._base_url = f"{"http" if "localhost" in split_uri[1] else "https"}://{split_uri[1]}"
+            self._base_url = (
+                f"{'http' if 'localhost' in split_uri[1] else 'https'}"
+                f"://{split_uri[1]}"
+            )
+
             auth_parts = split_uri[0].split(':')
             if len(auth_parts) != 2:
                 raise ValueError("URI must include owner_id and auth_token")
 
-            if '.' in auth_parts[0]:
-                self._owner_id = auth_parts[0]  # dev_id.app_id format
-                self._auth_token = auth_parts[1]
-            else:
-                self._owner_id = auth_parts[0]  # eu_id format
-                self._auth_token = auth_parts[1]
+            self._owner_id = auth_parts[0]
+            self._auth_token = auth_parts[1]
 
-            # Validate token structure (not signature)
+            # Basic token validation
             try:
-                decoded = jwt.decode(self._auth_token, options={"verify_signature": False})
-                self._token_expiry = datetime.fromtimestamp(decoded['exp'], UTC)
+                jwt.decode(self._auth_token, options={"verify_signature": False})
             except jwt.InvalidTokenError as e:
                 raise ValueError(f"Invalid auth token format: {str(e)}")
 
         except Exception as e:
-            raise AuthenticationError(f"Failed to setup authentication: {str(e)}")
+            raise ValueError(f"Failed to setup authentication: {str(e)}")
 
-    async def _make_request(
+    async def _request(
         self,
         method: str,
         endpoint: str,
-        data: Dict[str, Any] = None,
-        retry_count: int = 0
+        data: Dict[str, Any] = None
     ) -> Dict[str, Any]:
-        """Make authenticated HTTP request with retries"""
-        # if datetime.now(UTC) > self._token_expiry:
-        #     raise AuthenticationError("Authentication token has expired")
+        """Make authenticated HTTP request"""
         headers = {
-            "X-Owner-ID": self._owner_id,
-            "X-Auth-Token": self._auth_token,
+            "Authorization": f"Bearer {self._auth_token}",
             "Content-Type": "application/json"
         }
 
@@ -117,103 +113,102 @@ class DataBridge:
                 json=data,
                 headers=headers
             )
-
             response.raise_for_status()
             return response.json()
 
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 401:
-                raise AuthenticationError("Authentication failed: " + str(e))
-            elif e.response.status_code >= 500 and retry_count < self._max_retries:
-                await asyncio.sleep(2 ** retry_count)  # Exponential backoff
-                return await self._make_request(method, endpoint, data, retry_count + 1)
-            else:
-                raise ConnectionError(f"Request failed: {e.response.text}")
+                raise ValueError("Authentication failed")
+            raise ConnectionError(f"Request failed: {e.response.text}")
+
         except Exception as e:
             raise ConnectionError(f"Request failed: {str(e)}")
 
     async def ingest_document(
         self,
         content: Union[str, bytes],
+        content_type: str,
         metadata: Optional[Dict[str, Any]] = None,
         filename: Optional[str] = None
-    ) -> str:
+    ) -> Document:
         """
         Ingest a document into DataBridge.
         
         Args:
             content: Document content (string or bytes)
+            content_type: MIME type of the content
             metadata: Optional document metadata
-            filename: Optional filename - defaults to doc_id if not provided
+            filename: Optional filename
+            
         Returns:
-            Document ID of the ingested document
+            Document object with metadata
         """
-        metadata = metadata or {}
-        if filename:
-            metadata["filename"] = filename
-
+        # Handle content encoding
         if isinstance(content, bytes):
-            import base64
-            content = base64.b64encode(content).decode()
-            metadata = metadata
-            metadata["is_base64"] = True
+            encoded_content = base64.b64encode(content).decode('utf-8')
+        else:
+            encoded_content = content
 
-        response = await self._make_request(
-            "POST",
-            "ingest",
-            {
-                "content": content,
-                "metadata": metadata
-            }
+        request = IngestRequest(
+            content=encoded_content,
+            content_type=content_type,
+            metadata=metadata or {},
+            filename=filename
         )
 
-        return response["document_id"]
+        response = await self._request("POST", "documents", request.model_dump())
+        return Document(**response)
 
     async def query(
         self,
         query: str,
+        return_type: str = "chunks",
+        filters: Optional[Dict[str, Any]] = None,
         k: int = 4,
-        filters: Optional[Dict[str, Any]] = None
-    ) -> List[QueryResult]:
+        min_score: float = 0.0
+    ) -> Union[List[ChunkResult], List[DocumentResult]]:
         """
         Query documents in DataBridge.
         
         Args:
             query: Query string
-            k: Number of results to return
+            return_type: Type of results ("chunks" or "documents")
             filters: Optional metadata filters
-
+            k: Number of results to return
+            min_score: Minimum similarity score threshold
+            
         Returns:
-            List of QueryResult objects
+            List of ChunkResult or DocumentResult objects
         """
-        response = await self._make_request(
-            "POST",
-            "query",
-            {
-                "query": query,
-                "k": k,
-                "filters": filters
-            }
+        request = {
+            "query": query,
+            "return_type": return_type,
+            "filters": filters,
+            "k": k,
+            "min_score": min_score
+        }
+
+        response = await self._request("POST", "query", request)
+
+        if return_type == "chunks":
+            return [ChunkResult(**r) for r in response]
+        return [DocumentResult(**r) for r in response]
+
+    async def list_documents(
+        self,
+        skip: int = 0,
+        limit: int = 100
+    ) -> List[Document]:
+        """List accessible documents with pagination"""
+        response = await self._request(
+            "GET",
+            f"documents?skip={skip}&limit={limit}"
         )
-
-        return [
-            QueryResult(
-                content=result["content"],
-                doc_id=result["doc_id"],
-                score=result.get("score"),
-                metadata=result.get("metadata", {})
-            )
-            for result in response["results"]
-        ]
-
-    async def get_documents(self) -> List[Document]:
-        """Get all documents"""
-        response = await self._make_request("GET", "documents")
         return [Document(**doc) for doc in response]
 
-    async def get_document_by_id(self, id: str) -> List[Document]:
-        """Get all documents"""
-        response = await self._make_request("GET", f'document/{id}')
+    async def get_document(self, document_id: str) -> Document:
+        """Get document by ID"""
+        response = await self._request("GET", f"documents/{document_id}")
         return Document(**response)
 
     async def close(self):
@@ -221,13 +216,9 @@ class DataBridge:
         await self._client.aclose()
 
     async def __aenter__(self):
-        """Async context manager entry"""
+        """Context manager entry"""
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Async context manager exit"""
+        """Context manager exit"""
         await self.close()
-
-    def __repr__(self) -> str:
-        """Safe string representation"""
-        return f"DataBridge(owner_id='{self._owner_id}')"

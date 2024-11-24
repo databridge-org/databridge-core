@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
-from core.document import AuthContext, DocumentChunk
+from core.models.auth import AuthContext
+from core.models.documents import DocumentChunk
 
 
 class BaseVectorStore(ABC):
