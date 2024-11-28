@@ -56,12 +56,15 @@ class DataBridge:
     def __init__(
         self,
         uri: str,
-        timeout: int = 30,
+        timeout: int = 120,  # Increased timeout for long-running operations
         max_retries: int = 3
     ):
         self._timeout = timeout
         self._max_retries = max_retries
-        self._client = httpx.AsyncClient(timeout=timeout)
+        self._client = httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout=timeout, read=timeout),  # Set both connect and read timeouts
+            limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
+        )
         self._setup_auth(uri)
 
     def _setup_auth(self, uri: str) -> None:
@@ -118,9 +121,18 @@ class DataBridge:
                 headers=headers
             )
 
+            # For long-running operations, check if request was accepted
+            if response.status_code == 202:  # Accepted
+                logger.info("Request accepted, waiting for completion...")
+                # Could implement polling here if needed
+                return {"status": "accepted"}
+
             response.raise_for_status()
             return response.json()
 
+        except httpx.TimeoutException as e:
+            logger.warning(f"Request timed out but may still be processing: {str(e)}")
+            return {"status": "timeout", "message": "Request is still processing on the server"}
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 401:
                 raise AuthenticationError("Authentication failed: " + str(e))
@@ -130,6 +142,7 @@ class DataBridge:
             else:
                 raise ConnectionError(f"Request failed: {e.response.text}")
         except Exception as e:
+            logger.error(f"Request error: {str(e)}")
             raise ConnectionError(f"Request failed: {str(e)}")
 
     async def ingest_document(
@@ -148,26 +161,37 @@ class DataBridge:
         Returns:
             Document ID of the ingested document
         """
-        metadata = metadata or {}
-        if filename:
-            metadata["filename"] = filename
+        try:
+            metadata = metadata or {}
+            if filename:
+                metadata["filename"] = filename
 
-        if isinstance(content, bytes):
-            import base64
-            content = base64.b64encode(content).decode()
-            metadata = metadata
-            metadata["is_base64"] = True
+            if isinstance(content, bytes):
+                import base64
+                content = base64.b64encode(content).decode()
+                metadata["is_base64"] = True
 
-        response = await self._make_request(
-            "POST",
-            "ingest",
-            {
-                "content": content,
-                "metadata": metadata
-            }
-        )
+            response = await self._make_request(
+                "POST",
+                "ingest",
+                {
+                    "content": content,
+                    "metadata": metadata
+                }
+            )
 
-        return response["document_id"]
+            if response.get("status") in ["accepted", "timeout"]:
+                logger.info("Document ingestion is being processed asynchronously")
+                return "processing"  # Or return a job ID if the API provides one
+
+            if not response or "document_id" not in response:
+                raise ValueError("Invalid response from server")
+
+            return response["document_id"]
+
+        except Exception as e:
+            logger.error(f"Ingestion error: {str(e)}")
+            raise ConnectionError(f"Document ingestion failed: {str(e)}")
 
     async def query(
         self,

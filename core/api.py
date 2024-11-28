@@ -11,7 +11,9 @@ import logging
 
 from pymongo import MongoClient
 from .vector_store.mongo_vector_store import MongoDBAtlasVectorStore
+from .vector_store.contextual_vector_store import ContextualVectorStore
 from .embedding_model.openai_embedding_model import OpenAIEmbeddingModel
+from .embedding_model.voyageai_embedding_model import VoyageAIEmbeddingModel
 from .parser.unstructured_parser import UnstructuredAPIParser
 from .planner.simple_planner import SimpleRAGPlanner
 from .document import DocumentChunk, Permission, Source, SystemMetadata, AuthContext, AuthType
@@ -73,16 +75,23 @@ class ServiceConfig:
         """Initialize service components"""
         try:
             self.database = MongoClient(os.getenv("MONGODB_URI")).get_database(os.getenv("DB_NAME", "DataBridgeTest")).get_collection(os.getenv("COLLECTION_NAME", "test"))
-            self.vector_store = MongoDBAtlasVectorStore(
-                connection_string=os.getenv("MONGODB_URI"),
-                database_name=os.getenv("DB_NAME", "DataBridgeTest"),
-                collection_name=os.getenv("COLLECTION_NAME", "test")
+            
+            # Create enhanced vector store
+            self.vector_store = ContextualVectorStore(
+                mongo_store=MongoDBAtlasVectorStore(
+                    connection_string=os.getenv("MONGODB_URI"),
+                    database_name=os.getenv("DB_NAME", "DataBridgeTest"),
+                    collection_name=os.getenv("COLLECTION_NAME", "test")
+                ),
+                semantic_weight=0.8,  # Configurable weights
+                bm25_weight=0.2
             )
 
-            self.embedding_model = OpenAIEmbeddingModel(
-                api_key=os.getenv("OPENAI_API_KEY"),
-                model_name=os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
-            )
+            # self.embedding_model = OpenAIEmbeddingModel(
+            #     api_key=os.getenv("OPENAI_API_KEY"),
+            #     model_name=os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+            # )
+            self.embedding_model = VoyageAIEmbeddingModel()
 
             self.parser = UnstructuredAPIParser(
                 api_key=os.getenv("UNSTRUCTURED_API_KEY"),
@@ -327,29 +336,28 @@ async def query_documents(
     request: QueryRequest,
     auth: AuthContext = Depends(verify_auth)
 ) -> QueryResponse:
-    """
-    Query documents in DataBridge.
-    All configuration and credentials are handled server-side.
-    """
+    """Enhanced query endpoint using contextual embeddings, BM25, and reranking."""
     logger.info(f"Processing query for owner {auth.type}")
-    # Create plan
-    plan = service.planner.plan_retrieval(request.query, k=request.k)
+    
+    # Get query embedding
     query_embedding = await service.embedding_model.embed_for_query(request.query)
-
-    # Query vector store
-    chunks = service.vector_store.query_similar(
-        query_embedding,
-        k=plan["k"],
+    
+    # Query using enhanced retrieval
+    chunks = await service.vector_store.query_similar(
+        query_embedding=query_embedding,
+        query_text=request.query,
+        k=request.k or 4,
         auth=auth,
-        filters=request.filters
+        filters=request.filters,
+        rerank=True  # Enable reranking by default
     )
-
+    
     results = [
         {
-            "content": chunk.content,
-            "doc_id": chunk.system_metadata.doc_id,
-            "score": chunk.score,
-            "metadata": chunk.metadata
+            "content": chunk["content"],
+            "doc_id": chunk["metadata"]["doc_id"],
+            "score": chunk["score"],
+            "metadata": chunk["metadata"]
         }
         for chunk in chunks
     ]
@@ -366,7 +374,7 @@ async def health_check():
     """Check service health"""
     try:
         # Verify MongoDB connection
-        service.vector_store.collection.find_one({})
+        service.vector_store.mongo_store.collection.find_one({})
         return {"status": "healthy"}
     except Exception as e:
         raise DataBridgeException(

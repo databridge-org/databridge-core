@@ -1,0 +1,2019 @@
+start_server.py
+import uvicorn
+import os
+from dotenv import load_dotenv
+
+
+def main():
+    # Load environment variables from .env file
+    load_dotenv()
+
+    # Verify required environment variables
+    required_vars = [
+        "MONGODB_URI",
+        "OPENAI_API_KEY",
+        "UNSTRUCTURED_API_KEY",
+        "JWT_SECRET_KEY"
+    ]
+    
+    missing = [var for var in required_vars if not os.getenv(var)]
+
+    if missing:
+        raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
+
+    # Start server
+    uvicorn.run(
+        "core.api:app",
+        host="0.0.0.0",  # Listen on all available interfaces
+        port=8001,
+        reload=True,  # Enable auto-reload during development
+        loop="asyncio"
+    )
+
+if __name__ == "__main__":
+    main()
+
+
+================================================================================
+
+core/api.py
+import uuid
+from fastapi import FastAPI, HTTPException, Depends, Header, Request, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from typing import Dict, Any, List, Optional, Annotated, Union
+from pydantic import BaseModel, Field
+import jwt
+import os
+from datetime import datetime, UTC
+import logging
+
+from pymongo import MongoClient
+from .vector_store.mongo_vector_store import MongoDBAtlasVectorStore
+from .vector_store.contextual_vector_store import ContextualVectorStore
+from .embedding_model.openai_embedding_model import OpenAIEmbeddingModel
+from .embedding_model.voyageai_embedding_model import VoyageAIEmbeddingModel
+from .parser.unstructured_parser import UnstructuredAPIParser
+from .planner.simple_planner import SimpleRAGPlanner
+from .document import DocumentChunk, Permission, Source, SystemMetadata, AuthContext, AuthType
+from .utils.aws_utils import get_s3_client, upload_from_encoded_string, create_presigned_url
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Initialize FastAPI app
+app = FastAPI(
+    title="DataBridge API",
+    description="REST API for DataBridge document ingestion and querying",
+    version="1.0.0"
+)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+class DataBridgeException(HTTPException):
+    def __init__(self, detail: str, status_code: int = 400):
+        super().__init__(status_code=status_code, detail=detail)
+
+
+class AuthenticationError(DataBridgeException):
+    def __init__(self, detail: str = "Authentication failed"):
+        super().__init__(detail=detail, status_code=status.HTTP_401_UNAUTHORIZED)
+
+
+class ServiceConfig:
+    """Service-wide configuration and component management"""
+    def __init__(self):
+        self.jwt_secret = os.getenv("JWT_SECRET_KEY")
+        if not self.jwt_secret:
+            raise ValueError("JWT_SECRET_KEY environment variable not set")
+
+        # Required environment variables
+        required_vars = {
+            "MONGODB_URI": "MongoDB connection string",
+            "OPENAI_API_KEY": "OpenAI API key",
+            "UNSTRUCTURED_API_KEY": "Unstructured API key"
+        }
+
+        missing = [f"{var} ({desc})" for var, desc in required_vars.items() if not os.getenv(var)]
+        if missing:
+            raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
+
+        # Initialize core components
+        self._init_components()
+
+    def _init_components(self):
+        """Initialize service components"""
+        try:
+            self.database = MongoClient(os.getenv("MONGODB_URI")).get_database(os.getenv("DB_NAME", "DataBridgeTest")).get_collection(os.getenv("COLLECTION_NAME", "test"))
+            
+            # Create enhanced vector store
+            self.vector_store = ContextualVectorStore(
+                mongo_store=MongoDBAtlasVectorStore(
+                    connection_string=os.getenv("MONGODB_URI"),
+                    database_name=os.getenv("DB_NAME", "DataBridgeTest"),
+                    collection_name=os.getenv("COLLECTION_NAME", "test")
+                ),
+                semantic_weight=0.8,  # Configurable weights
+                bm25_weight=0.2
+            )
+
+            # self.embedding_model = OpenAIEmbeddingModel(
+            #     api_key=os.getenv("OPENAI_API_KEY"),
+            #     model_name=os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+            # )
+            self.embedding_model = VoyageAIEmbeddingModel()
+
+            self.parser = UnstructuredAPIParser(
+                api_key=os.getenv("UNSTRUCTURED_API_KEY"),
+                chunk_size=int(os.getenv("CHUNK_SIZE", "1000")),
+                chunk_overlap=int(os.getenv("CHUNK_OVERLAP", "200"))
+            )
+
+            self.planner = SimpleRAGPlanner(
+                default_k=int(os.getenv("DEFAULT_K", "4"))
+            )
+        except Exception as e:
+            raise ValueError(f"Failed to initialize components: {str(e)}")
+
+    async def verify_token(self, token: str, owner_id: str) -> AuthContext:
+        """Verify JWT token and return auth context"""
+        try:
+            payload = jwt.decode(token, self.jwt_secret, algorithms=["HS256"])
+            
+            if datetime.fromtimestamp(payload["exp"], UTC) < datetime.now(UTC):
+                raise AuthenticationError("Token has expired")
+
+            # Check if this is a developer token
+            if "." in owner_id:  # dev_id.app_id format
+                dev_id, app_id = owner_id.split(".")
+                return AuthContext(
+                    type=AuthType.DEVELOPER,
+                    dev_id=dev_id,
+                    app_id=app_id
+                )
+            else:  # User token
+                return AuthContext(
+                    type=AuthType.USER,
+                    eu_id=owner_id
+                )
+
+        except jwt.InvalidTokenError:
+            raise AuthenticationError("Invalid token")
+        except Exception as e:
+            raise AuthenticationError(f"Authentication failed: {str(e)}")
+
+
+# Initialize service
+service = ServiceConfig()
+
+
+# Request/Response Models
+class Document(BaseModel):
+    id: str
+    name: str
+    type: str
+    source: str
+    uploaded_at: str
+    size: str
+    redaction_level: str
+    stats: Dict[str, Union[int, str]] = Field(
+        default_factory=lambda: {
+            "ai_queries": 0,
+            "time_saved": "0h",
+            "last_accessed": ""
+        }
+    )
+    accessed_by: List[Dict[str, str]] = Field(default_factory=list)
+    sensitive_content: Optional[List[str]] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    s3_bucket: Optional[str] = None
+    s3_key: Optional[str] = None
+    presigned_url: Optional[str] = None
+
+    @classmethod
+    def from_mongo(cls, data: Dict[str, Any]) -> "Document":
+        """Create from MongoDB document"""
+        # Convert MongoDB document to Document model
+        s3_key = data.get("system_metadata", {}).get("s3_key")
+        s3_bucket = data.get("system_metadata", {}).get("s3_bucket")
+        presigned_url = create_presigned_url(get_s3_client(), s3_bucket, s3_key)
+        return cls(
+            id=str(data.get("_id")),
+            name=data.get("system_metadata", {}).get("filename") or "Untitled",
+            type="document", # Default type for now
+            source=data.get("source"),
+            uploaded_at=str(data.get("_id").generation_time), # MongoDB ObjectId contains timestamp
+            size="N/A", # Size not stored currently
+            redaction_level="none", # Default redaction level
+            stats={
+                "ai_queries": 0,
+                "time_saved": "0h", 
+                "last_accessed": ""
+            },
+            accessed_by=[],
+            metadata=data.get("metadata", {}),
+            s3_bucket=s3_bucket,
+            s3_key=s3_key,
+            presigned_url=presigned_url
+        )
+
+
+class IngestRequest(BaseModel):
+    content: str = Field(..., description="Document content (text or base64)")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Document metadata")
+    eu_id: Optional[str] = Field(None, description="End user ID when developer ingests for user")
+
+
+class QueryRequest(BaseModel):
+    query: str = Field(..., description="Query string")
+    k: Optional[int] = Field(default=4, description="Number of results to return")
+    filters: Optional[Dict[str, Any]] = Field(default=None, 
+                                            description="Optional metadata filters")
+
+
+class IngestResponse(BaseModel):
+    document_id: str = Field(..., description="Ingested document ID")
+    message: str = Field(default="Document ingested successfully")
+
+
+class QueryResponse(BaseModel):
+    results: List[Dict[str, Any]] = Field(..., description="Query results")
+    total_results: int = Field(..., description="Total number of results")
+
+
+# Authentication dependency
+async def verify_auth(
+    owner_id: Annotated[str, Header(alias="X-Owner-ID")],
+    auth_token: Annotated[str, Header(alias="X-Auth-Token")]
+) -> str:
+    """Verify authentication headers"""
+    return await service.verify_token(auth_token, owner_id)
+
+
+# Error handler middleware
+@app.middleware("http")
+async def error_handler(request: Request, call_next):
+    try:
+        return await call_next(request)
+    except DataBridgeException as e:
+        return JSONResponse(
+            status_code=e.status_code,
+            content={"error": e.detail}
+        )
+    except Exception as e:
+        logger.exception("Unexpected error")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"error": "Internal server error"}
+        )
+    
+
+#TODO: This is not complete - only returns s3 urls, we need to find a way to make itwork over regular content also or make ti work for preseigned urls.
+@app.get("/documents", response_model=List[Document])
+async def get_documents(auth: AuthContext = Depends(verify_auth)) -> List[Document]:
+    """Get all document files. Content ingested as string will have an empty presigned url field."""
+    match_stage = {
+        "$match": {
+            "$or": [
+                {"system_metadata.dev_id": auth.dev_id},  # Dev's own docs
+                {"permissions": {"$in": [auth.app_id]}}  # Docs app has access to
+            ]
+        } if auth.type == AuthType.DEVELOPER else {"system_metadata.eu_id": auth.eu_id}
+    }
+
+    pipeline = [
+        match_stage,
+        {
+            "$group": {
+                "_id": "$system_metadata.s3_key",
+                "doc": {"$first": "$$ROOT"}
+            }
+        },
+        {
+            "$replaceRoot": {"newRoot": "$doc"}
+        }
+    ]
+
+    documents = list(service.database.aggregate(pipeline))
+    return [Document.from_mongo(doc) for doc in documents]
+
+
+# TODO: Move to the way brandsync stored embeddings and documents separately - 
+# all the metadata and all info is stored in one collection, and embeddings stored 
+# in another store. (seperation of concerns)
+@app.post("/ingest", response_model=IngestResponse)
+async def ingest_document(
+    request: IngestRequest,
+    auth: AuthContext = Depends(verify_auth)
+) -> IngestResponse:
+    """Ingest a document into DataBridge."""
+    logger.info(f"Ingesting document for {auth.type}")
+
+    # Generate document ID for all chunks.
+    doc_id = str(uuid.uuid4())
+    s3_client = get_s3_client()
+    s3_bucket, s3_key = upload_from_encoded_string(s3_client, request.content, doc_id)
+
+    # Set up system metadata.
+    system_metadata = SystemMetadata(doc_id=doc_id, s3_bucket=s3_bucket, s3_key=s3_key)
+    if request.metadata.get("filename"):
+        system_metadata.filename = request.metadata["filename"]
+    if auth.type == AuthType.DEVELOPER:
+        system_metadata.dev_id = auth.dev_id
+        system_metadata.app_id = auth.app_id
+        if request.eu_id:
+            system_metadata.eu_id = request.eu_id
+    else:
+        system_metadata.eu_id = auth.eu_id
+
+    # Parse into chunks.
+    chunk_texts = service.parser.parse(request.content, request.metadata)
+    embeddings = await service.embedding_model.embed_for_ingestion(chunk_texts)
+
+    # Create chunks.
+    chunks = []
+    for text, embedding in zip(chunk_texts, embeddings):
+        # Set source and permissions based on context.
+        if auth.type == AuthType.DEVELOPER:
+            source = Source.APP
+            permissions = {auth.app_id: {Permission.READ, Permission.WRITE, Permission.DELETE}} if request.eu_id else {}
+        else:
+            source = Source.SELF_UPLOADED
+            permissions = {}
+
+        chunk = DocumentChunk(
+            content=text,
+            embedding=embedding,
+            metadata=request.metadata,
+            system_metadata=system_metadata,
+            source=source,
+            permissions=permissions
+        )
+        chunks.append(chunk)
+
+    # Store in vector store.
+    if not service.vector_store.store_embeddings(chunks):
+        raise DataBridgeException(
+            "Failed to store embeddings",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+    return IngestResponse(document_id=doc_id)
+
+
+@app.post("/query", response_model=QueryResponse)
+async def query_documents(
+    request: QueryRequest,
+    auth: AuthContext = Depends(verify_auth)
+) -> QueryResponse:
+    """Enhanced query endpoint using contextual embeddings, BM25, and reranking."""
+    logger.info(f"Processing query for owner {auth.type}")
+    
+    # Get query embedding
+    query_embedding = await service.embedding_model.embed_for_query(request.query)
+    
+    # Query using enhanced retrieval
+    chunks = await service.vector_store.query_similar(
+        query_embedding=query_embedding,
+        query_text=request.query,
+        k=request.k or 4,
+        auth=auth,
+        filters=request.filters,
+        rerank=True  # Enable reranking by default
+    )
+    
+    results = [
+        {
+            "content": chunk["content"],
+            "doc_id": chunk["metadata"]["doc_id"],
+            "score": chunk["score"],
+            "metadata": chunk["metadata"]
+        }
+        for chunk in chunks
+    ]
+
+    return QueryResponse(
+        results=results,
+        total_results=len(results)
+    )
+
+
+# Health check endpoint
+@app.get("/health")
+async def health_check():
+    """Check service health"""
+    try:
+        # Verify MongoDB connection
+        service.vector_store.collection.find_one({})
+        return {"status": "healthy"}
+    except Exception as e:
+        raise DataBridgeException(
+            f"Service unhealthy: {str(e)}", 
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE
+        )
+
+
+# Startup and shutdown events
+@app.on_event("startup")
+async def startup_event():
+    """Verify all connections on startup"""
+    logger.info("Starting DataBridge service")
+    await health_check()
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup on shutdown"""
+    logger.info("Shutting down DataBridge service")
+
+
+================================================================================
+
+core/document.py
+from typing import Dict, Any, List, Optional, Set
+from dataclasses import dataclass
+from enum import Enum
+
+
+class AuthType(str, Enum):
+    DEVELOPER = "developer"
+    USER = "user"
+
+
+@dataclass
+class AuthContext:
+    """Authentication context for request"""
+    type: AuthType
+    eu_id: Optional[str] = None
+    dev_id: Optional[str] = None
+    app_id: Optional[str] = None
+
+
+class Permission(str, Enum):
+    READ = "R"
+    WRITE = "W"
+    DELETE = "D"
+
+
+class Source(str, Enum):
+    APP = "app"  # TODO name of app
+    SELF_UPLOADED = "self_uploaded"
+    GOOGLE_DRIVE = "google_drive"
+    NOTION = "notion"
+
+
+@dataclass
+class SystemMetadata:
+    """Metadata controlled by our system"""
+    dev_id: Optional[str] = None
+    app_id: Optional[str] = None
+    eu_id: Optional[str] = None
+    doc_id: str = None
+    s3_bucket: str = None
+    s3_key: str = None
+    filename: Optional[str] = None
+
+
+class DocumentChunk:
+    def __init__(
+        self,
+        content: str,
+        embedding: List[float],
+        metadata: Dict[str, Any],  # user has control over
+        system_metadata: SystemMetadata,  # set by us
+        source: Source,
+        permissions: Dict[str, Set[Permission]] = None
+    ):
+        self.content = content
+        self.embedding = embedding
+        self.metadata = metadata
+        self.system_metadata = system_metadata
+        self.source = source
+        self.permissions = permissions or {}
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for storage"""
+        return {
+            "content": self.content,
+            "embedding": self.embedding,
+            "metadata": self.metadata,
+            "system_metadata": vars(self.system_metadata),
+            "source": self.source.value,
+            "permissions": {
+                app_id: [p.value for p in perms]
+                for app_id, perms in self.permissions.items()
+            }
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "DocumentChunk":
+        """Create from stored dictionary"""
+        # Convert stored permission values back to Permission enums
+        permissions = {
+            app_id: {Permission(p) for p in perms}
+            for app_id, perms in data.get("permissions", {}).items()
+        }
+
+        return cls(
+            content=data["content"],
+            embedding=data["embedding"],
+            metadata=data["metadata"],
+            system_metadata=SystemMetadata(**data["system_metadata"]),
+            source=Source(data["source"]),
+            permissions=permissions
+        )
+
+
+================================================================================
+
+core/planner/base_planner.py
+from abc import ABC, abstractmethod
+from typing import Dict, Any
+
+
+class BasePlanner(ABC):
+    @abstractmethod
+    def plan_retrieval(self, query: str, **kwargs) -> Dict[str, Any]:
+        """Create execution plan for retrieval"""
+        pass
+
+
+================================================================================
+
+core/planner/simple_planner.py
+from typing import Dict, Any
+from .base_planner import BasePlanner
+
+
+class SimpleRAGPlanner(BasePlanner):
+    def __init__(self, default_k: int = 3):
+        self.default_k = default_k
+
+    def plan_retrieval(self, query: str, **kwargs) -> Dict[str, Any]:
+        """Create a simple retrieval plan."""
+        return {
+            "strategy": "simple_retrieval",
+            "k": kwargs.get("k", self.default_k),
+            "query": query,
+            "filters": kwargs.get("filters", {}),
+            "min_score": kwargs.get("min_score", 0.0)
+        }
+
+
+================================================================================
+
+core/utils/aws_utils.py
+import base64
+import logging
+import os
+from functools import lru_cache
+from pathlib import Path
+import tempfile
+from typing import Tuple
+
+import boto3
+from botocore.exceptions import ClientError
+from bson import ObjectId
+from dotenv import load_dotenv
+from mypy_boto3_s3 import S3Client
+from pymongo.database import Database
+
+from .file_extensions import detect_file_type
+
+load_dotenv()
+AWS_ACCESS_KEY = os.getenv("AWS_ACCESS_KEY")
+AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+BUCKET_NAME = "databridge-storage"
+COLLECTION_NAME = os.getenv("COLLECTION_NAME", "test")
+
+
+@lru_cache(maxsize=1)
+def get_s3_client():
+    return boto3.client(
+        "s3",
+        aws_access_key_id=AWS_ACCESS_KEY,
+        aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+        region_name="us-east-2",
+    )
+
+
+
+def upload_from_encoded_string(s3_client: S3Client, content: str, doc_id: str, bucket_name=BUCKET_NAME):
+    extension = detect_file_type(content)
+    try:
+        # Create temporary file for content
+        decoded_content = base64.b64decode(content)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=extension) as temp_file:
+            temp_file.write(decoded_content)
+            temp_file_path = temp_file.name
+            bucket, key = upload_to_s3_from_path(s3_client, temp_file_path, doc_id, bucket_name)
+        os.remove(temp_file_path)
+        return bucket, key
+    except Exception as e:
+        logging.error(f"Error decoding base64 content: {e}")
+        return None, None
+
+
+def upload_from_file(s3_client: S3Client, file, bucket_name=BUCKET_NAME):
+    bytestream = file.file
+    key = f"{file.filename}"
+    try:
+        s3_client.upload_fileobj(bytestream, bucket_name, key)
+    except ClientError as e:
+        logging.error(e)
+        return None, None
+    return bucket_name, key
+
+
+def upload_video_to_s3_from_file(file):
+    s3_client = get_s3_client()
+    return upload_from_file(s3_client, file)
+
+
+def upload_to_s3_from_path(s3_client, file_name, object_name, bucket_name=BUCKET_NAME):
+    try:
+        s3_client.upload_file(file_name, bucket_name, object_name)
+    except ClientError as e:
+        logging.error(e)
+        return None, None
+    return bucket_name, object_name
+
+
+def upload_video_to_s3(video_path: str, video_name: str):
+    s3_client = get_s3_client()
+    return upload_to_s3_from_path(
+        s3_client=s3_client, file_name=str(video_path), bucket_name=BUCKET_NAME, object_name=video_name
+    )
+
+
+def upload_image_to_s3(thumbnail_path: Path, thumbnail_name: str):
+    s3_client = get_s3_client()
+    return upload_to_s3_from_path(
+        s3_client=s3_client, file_name=str(thumbnail_path), bucket_name=BUCKET_NAME, object_name=thumbnail_name
+    )
+
+
+def create_presigned_url(s3_client, bucket_name, object_name, expiration=3600) -> str:
+    if not object_name or not bucket_name:
+        return ""
+    try:
+        response = s3_client.generate_presigned_url(
+            "get_object", Params={"Bucket": bucket_name, "Key": object_name}, ExpiresIn=expiration
+        )
+    except ClientError as e:
+        logging.error(e)
+        return ""
+    return response
+
+
+def delete_file_from_s3(s3_client, bucket_name, key):
+    try:
+        s3_client.delete_object(Bucket=bucket_name, Key=key)
+        logging.info(f"File {key} deleted successfully from bucket {bucket_name}")
+        return True
+    except ClientError as e:
+        logging.error(f"Error deleting file from S3: {e}")
+        return False
+
+
+def get_file_from_s3(s3_client, bucket_name, key):
+    try:
+        response = s3_client.get_object(Bucket=bucket_name, Key=key)
+        file_content = response["Body"].read()
+        logging.info(f"File {key} retrieved successfully from bucket {bucket_name}")
+        return file_content
+    except ClientError as e:
+        logging.error(f"Error retrieving file from S3: {e}")
+        return None
+
+
+def get_specific_asset(db: Database, s3_client: S3Client, asset_id: str) -> Tuple[str, bytes]:
+    asset = db[COLLECTION_NAME].find_one({"_id": ObjectId(asset_id)})
+    bucket_name, key = asset["bucket_name"], asset["key"]
+    s3_object = s3_client.get_object(Bucket=bucket_name, Key=key)
+    return key, s3_object["Body"].read()
+
+
+================================================================================
+
+core/utils/file_extensions.py
+import base64
+import magic
+
+def detect_file_type(content: str) -> str:
+    """
+    Detect file type from content string and return appropriate extension.
+    Content can be either base64 encoded or plain text.
+    """
+    # Try to detect file type from base64 heade
+    
+    # Decode base64 content
+    try:
+        decoded_content = base64.b64decode(content)
+    except:
+        # If not base64, treat as plain text
+        decoded_content = content.encode('utf-8')
+        
+    # Use python-magic to detect mime type from content
+    mime = magic.Magic(mime=True)
+    detected_type = mime.from_buffer(decoded_content)
+    
+    # Map mime type to extension
+    extension_map = {
+        'application/pdf': '.pdf',
+        'image/jpeg': '.jpg',
+        'image/png': '.png',
+        'image/gif': '.gif',
+        'image/webp': '.webp',
+        'image/tiff': '.tiff',
+        'image/bmp': '.bmp',
+        'image/svg+xml': '.svg',
+        'video/mp4': '.mp4',
+        'video/mpeg': '.mpeg',
+        'video/quicktime': '.mov',
+        'video/x-msvideo': '.avi',
+        'video/webm': '.webm',
+        'video/x-matroska': '.mkv',
+        'video/3gpp': '.3gp',
+        'text/plain': '.txt',
+        'application/msword': '.doc',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx'
+    }
+    return extension_map.get(detected_type, '.bin')
+
+================================================================================
+
+core/parser/base_parser.py
+from abc import ABC, abstractmethod
+from typing import Dict, Any, List
+
+
+class BaseParser(ABC):
+    @abstractmethod
+    def parse(self, content: str, metadata: Dict[str, Any]) -> List[str]:
+        """Parse content into chunks"""
+        pass
+
+
+================================================================================
+
+core/parser/unstructured_parser.py
+from typing import Dict, Any, List
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+from tqdm import tqdm
+from .base_parser import BaseParser
+from langchain_unstructured import UnstructuredLoader
+import os
+import tempfile
+import base64
+from dotenv import load_dotenv
+import anthropic
+import logging
+
+logger = logging.getLogger(__name__)
+
+DOCUMENT_CONTEXT_PROMPT = """
+<document>
+{doc_content}
+</document>
+"""
+
+CHUNK_CONTEXT_PROMPT = """
+Here is the chunk we want to situate within the whole document
+<chunk>
+{chunk_content}
+</chunk>
+
+Please give a short succinct context to situate this chunk within the overall document for the purposes of improving search retrieval of the chunk.
+Answer only with the succinct context and nothing else.
+"""
+
+class UnstructuredAPIParser(BaseParser):
+    def __init__(
+        self,
+        api_key: str,
+        chunk_size: int = 1000,
+        chunk_overlap: int = 200,
+        parallel_threads: int = 5,
+        api_url: str = "https://api.unstructuredapp.io"
+    ):
+        load_dotenv()
+        self.api_key = api_key
+        self.api_url = api_url
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
+        self.parallel_threads = parallel_threads
+        self.anthropic_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+        
+        # Token tracking
+        self.token_counts = {
+            'input': 0,
+            'output': 0,
+            'cache_read': 0,
+            'cache_creation': 0
+        }
+        self.token_lock = threading.Lock()
+
+    def situate_context(self, doc: str, chunk: str) -> tuple[str, Any]:
+        """Generate contextual description for a chunk using Claude."""
+        response = self.anthropic_client.beta.prompt_caching.messages.create(
+            model="claude-3-haiku-20240307",
+            max_tokens=1024,
+            temperature=0.0,
+            messages=[
+                {
+                    "role": "user", 
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": DOCUMENT_CONTEXT_PROMPT.format(doc_content=doc),
+                            "cache_control": {"type": "ephemeral"}
+                        },
+                        {
+                            "type": "text",
+                            "text": CHUNK_CONTEXT_PROMPT.format(chunk_content=chunk),
+                        }
+                    ]
+                }
+            ],
+            extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"}
+        )
+        
+        # Update token counts thread-safely
+        with self.token_lock:
+            self.token_counts['input'] += response.usage.input_tokens
+            self.token_counts['output'] += response.usage.output_tokens
+            self.token_counts['cache_read'] += response.usage.cache_read_input_tokens
+            self.token_counts['cache_creation'] += response.usage.cache_creation_input_tokens
+        
+        return response.content[0].text, response.usage
+
+    def process_chunk(self, args: tuple) -> dict:
+        """Process a single chunk with contextualization."""
+        doc_content, chunk = args
+        context, usage = self.situate_context(doc_content, chunk)
+        return {
+            'chunk': chunk,
+            'context': context
+        }
+
+    def parse(self, content: str, metadata: Dict[str, Any]) -> List[str]:
+        """Parse content using Unstructured API and split into contextualized chunks."""
+        try:
+            # Create temporary file
+            with tempfile.NamedTemporaryFile(delete=False, suffix=self._get_file_extension(metadata)) as temp_file:
+                if metadata.get("is_base64", False):
+                    temp_file.write(base64.b64decode(content))
+                else:
+                    temp_file.write(content.encode('utf-8'))
+                temp_file_path = temp_file.name
+
+            try:
+                # Load and partition document
+                loader = UnstructuredLoader(
+                    file_path=temp_file_path,
+                    partition_via_api=True,
+                    api_key=self.api_key,
+                    chunking_strategy="by_title"
+                )
+                elements = loader.load()
+                logger.info(f"Loaded {len(elements)} elements from document")
+
+                # Get full document text
+                full_text = "\n\n".join(element.page_content for element in elements)
+                logger.info(f"Full document length: {len(full_text)} characters")
+
+                # Prepare chunks for concurrent processing
+                chunk_args = [(full_text, element.page_content) for element in elements]
+                
+                # Process chunks concurrently
+                contextualized_chunks = []
+                with ThreadPoolExecutor(max_workers=self.parallel_threads) as executor:
+                    # Submit all tasks
+                    future_to_chunk = {
+                        executor.submit(self.process_chunk, args): args 
+                        for args in chunk_args
+                    }
+                    
+                    # Process completed tasks with progress bar
+                    for future in tqdm(
+                        as_completed(future_to_chunk), 
+                        total=len(chunk_args),
+                        desc="Processing chunks"
+                    ):
+                        try:
+                            result = future.result()
+                            contextualized_chunks.append(
+                                f"{result['chunk']}\n\n{result['context']}"
+                            )
+                        except Exception as e:
+                            logger.error(f"Error processing chunk: {str(e)}")
+
+                # Log token usage statistics
+                total_tokens = (
+                    self.token_counts['input'] + 
+                    self.token_counts['cache_read'] + 
+                    self.token_counts['cache_creation']
+                )
+                cache_savings = (
+                    (self.token_counts['cache_read'] / total_tokens * 100)
+                    if total_tokens > 0 else 0
+                )
+                
+                logger.info(f"Parsing complete. Statistics:")
+                logger.info(f"- Total chunks processed: {len(contextualized_chunks)}")
+                logger.info(f"- Input tokens: {self.token_counts['input']}")
+                logger.info(f"- Output tokens: {self.token_counts['output']}")
+                logger.info(f"- Cache creation tokens: {self.token_counts['cache_creation']}")
+                logger.info(f"- Cache read tokens: {self.token_counts['cache_read']}")
+                logger.info(f"- Cache savings: {cache_savings:.2f}%")
+                logger.info("Note: Cache read tokens come at a 90% discount!")
+
+                return contextualized_chunks
+
+            finally:
+                # Clean up temp file
+                os.unlink(temp_file_path)
+
+        except Exception as e:
+            logger.error(f"Error parsing document: {str(e)}")
+            raise
+
+    def _get_file_extension(self, metadata: Dict[str, Any]) -> str:
+        """Get appropriate file extension based on metadata."""
+        if "filename" in metadata:
+            _, ext = os.path.splitext(metadata["filename"])
+            return ext if ext else ".txt"
+        return ".txt"
+
+
+================================================================================
+
+core/vector_store/contextual_vector_store.py
+from typing import List, Dict, Any, Optional
+import numpy as np
+from elasticsearch import Elasticsearch
+from elasticsearch.helpers import bulk
+import cohere
+from core.document import AuthType, DocumentChunk, AuthContext
+
+class ContextualVectorStore:
+    """Enhanced vector store combining MongoDB Atlas, Elasticsearch BM25, and reranking."""
+    
+    def __init__(
+        self,
+        mongo_store,  # Existing MongoDBAtlasVectorStore
+        es_host: str = "http://localhost:9200",
+        es_index: str = "contextual_bm25_index",
+        semantic_weight: float = 0.8,
+        bm25_weight: float = 0.2
+    ):
+        self.mongo_store = mongo_store
+        self.es_client = Elasticsearch(es_host)
+        self.es_index = es_index
+        self.semantic_weight = semantic_weight
+        self.bm25_weight = bm25_weight
+        self.cohere_client = cohere.Client()
+        self._setup_es_index()
+
+    def _setup_es_index(self):
+        """Create Elasticsearch index with appropriate mappings."""
+        if not self.es_client.indices.exists(index=self.es_index):
+            index_settings = {
+                "settings": {
+                    "analysis": {"analyzer": {"default": {"type": "english"}}},
+                    "similarity": {"default": {"type": "BM25"}},
+                    "index.queries.cache.enabled": False
+                },
+                "mappings": {
+                    "properties": {
+                        "content": {"type": "text", "analyzer": "english"},
+                        "contextualized_content": {"type": "text", "analyzer": "english"},
+                        "doc_id": {"type": "keyword"},
+                        "chunk_id": {"type": "keyword"},
+                        "metadata": {"type": "object"},
+                        "system_metadata": {"type": "object"},
+                        "permissions": {"type": "object"}
+                    }
+                }
+            }
+            self.es_client.indices.create(index=self.es_index, body=index_settings)
+
+    def store_embeddings(self, chunks: List[DocumentChunk]) -> bool:
+        """Store embeddings in both MongoDB and Elasticsearch."""
+        try:
+            # Store in MongoDB
+            mongo_success = self.mongo_store.store_embeddings(chunks)
+            if not mongo_success:
+                return False
+
+            # Prepare documents for Elasticsearch
+            es_docs = []
+            for chunk in chunks:
+                es_doc = {
+                    "_index": self.es_index,
+                    "_source": {
+                        "content": chunk.content,
+                        "contextualized_content": chunk.metadata.get("contextualized_content", ""),
+                        "doc_id": chunk.system_metadata.doc_id,
+                        "chunk_id": chunk.metadata.get("chunk_id"),
+                        "metadata": chunk.metadata,
+                        "system_metadata": chunk.system_metadata.dict(),
+                        "permissions": chunk.permissions
+                    }
+                }
+                es_docs.append(es_doc)
+
+            # Store in Elasticsearch
+            if es_docs:
+                success, _ = bulk(self.es_client, es_docs)
+                self.es_client.indices.refresh(index=self.es_index)
+                return success > 0
+
+            return True
+
+        except Exception as e:
+            print(f"Error storing embeddings: {str(e)}")
+            return False
+
+    def _build_es_query(self, query: str, auth: AuthContext) -> dict:
+        """Build Elasticsearch query with auth filtering."""
+        if auth.type == AuthType.DEVELOPER:
+            auth_filter = {
+                "bool": {
+                    "should": [
+                        {"term": {"system_metadata.dev_id": auth.dev_id}},
+                        {"term": {f"permissions.{auth.app_id}": "read"}}
+                    ]
+                }
+            }
+        else:
+            auth_filter = {"term": {"system_metadata.eu_id": auth.eu_id}}
+
+        return {
+            "query": {
+                "bool": {
+                    "must": {
+                        "multi_match": {
+                            "query": query,
+                            "fields": ["content", "contextualized_content"],
+                            "type": "most_fields"
+                        }
+                    },
+                    "filter": auth_filter
+                }
+            }
+        }
+
+    def _merge_results(self, semantic_results: List[dict], bm25_results: List[dict], k: int) -> List[dict]:
+        """Merge semantic and BM25 results using reciprocal rank fusion."""
+        # Create a map of chunk IDs to their scores
+        chunk_scores = {}
+        
+        # Process semantic search results
+        for rank, result in enumerate(semantic_results, 1):
+            chunk_id = (result["metadata"]["doc_id"], result["metadata"].get("chunk_id"))
+            chunk_scores[chunk_id] = chunk_scores.get(chunk_id, 0) + (self.semantic_weight / rank)
+        
+        # Process BM25 results
+        for rank, result in enumerate(bm25_results, 1):
+            chunk_id = (result["_source"]["doc_id"], result["_source"].get("chunk_id"))
+            chunk_scores[chunk_id] = chunk_scores.get(chunk_id, 0) + (self.bm25_weight / rank)
+
+        # Sort chunks by combined score
+        sorted_chunks = sorted(chunk_scores.items(), key=lambda x: x[1], reverse=True)
+        
+        # Get top k results
+        results = []
+        seen_chunks = set()
+        for chunk_id, score in sorted_chunks:
+            if len(results) >= k:
+                break
+                
+            # Find the full document data from either semantic or BM25 results
+            chunk_data = None
+            for r in semantic_results:
+                if (r["metadata"]["doc_id"], r["metadata"].get("chunk_id")) == chunk_id:
+                    chunk_data = r
+                    break
+                    
+            if not chunk_data:
+                for r in bm25_results:
+                    if (r["_source"]["doc_id"], r["_source"].get("chunk_id")) == chunk_id:
+                        chunk_data = {
+                            "metadata": r["_source"]["metadata"],
+                            "content": r["_source"]["content"],
+                            "score": score
+                        }
+                        break
+
+            if chunk_data and chunk_id not in seen_chunks:
+                results.append(chunk_data)
+                seen_chunks.add(chunk_id)
+
+        return results
+
+    async def query_similar(
+        self,
+        query_embedding: List[float],
+        query_text: str,
+        k: int,
+        auth: AuthContext,
+        filters: Optional[Dict[str, Any]] = None,
+        rerank: bool = True
+    ) -> List[DocumentChunk]:
+        """
+        Enhanced query combining semantic search, BM25, and optional reranking.
+        Returns merged and optionally reranked results.
+        """
+        try:
+            # Get more results than needed for better reranking
+            expanded_k = k * 3 if rerank else k
+            
+            # Get semantic search results from MongoDB
+            semantic_results = self.mongo_store.query_similar(
+                query_embedding, 
+                expanded_k, 
+                auth, 
+                filters
+            )
+            
+            # Get BM25 results from Elasticsearch
+            es_query = self._build_es_query(query_text, auth)
+            es_results = self.es_client.search(
+                index=self.es_index,
+                body=es_query,
+                size=expanded_k
+            )
+            bm25_results = es_results["hits"]["hits"]
+            
+            # Merge results using reciprocal rank fusion
+            merged_results = self._merge_results(
+                semantic_results,
+                bm25_results,
+                expanded_k
+            )
+            
+            if rerank and len(merged_results) > k:
+                # Prepare documents for reranking
+                docs = [r["content"] for r in merged_results]
+                
+                # Rerank using Cohere
+                rerank_results = self.cohere_client.rerank(
+                    model="rerank-english-v2.0",
+                    query=query_text,
+                    documents=docs,
+                    top_n=k
+                )
+                
+                # Get final results in reranked order
+                final_results = []
+                for r in rerank_results:
+                    doc = merged_results[r.index]
+                    doc["score"] = r.relevance_score
+                    final_results.append(doc)
+                    
+                return final_results[:k]
+            
+            return merged_results[:k]
+
+        except Exception as e:
+            print(f"Error querying similar documents: {str(e)}")
+            return []
+
+================================================================================
+
+core/vector_store/mongo_vector_store.py
+from typing import List, Dict, Any
+from fastapi.logger import logger
+from pymongo import MongoClient
+
+from .base_vector_store import BaseVectorStore
+from core.document import AuthType, DocumentChunk, Source, SystemMetadata, AuthContext
+
+
+class MongoDBAtlasVectorStore(BaseVectorStore):
+    def __init__(
+        self,
+        connection_string: str,
+        database_name: str,
+        collection_name: str = "kb_chunked_embeddings",
+        index_name: str = "vector_index"
+    ):
+        self.client = MongoClient(connection_string)
+        self.db = self.client[database_name]
+        self.collection = self.db[collection_name]
+        self.index_name = index_name
+
+    def store_embeddings(self, chunks: List[DocumentChunk]) -> bool:
+        try:
+            documents = [chunk.to_dict() for chunk in chunks]
+
+            if documents:
+                # Use ordered=False to continue even if some inserts fail
+                result = self.collection.insert_many(documents, ordered=False)
+                return len(result.inserted_ids) > 0
+            return True
+
+        except Exception as e:
+            print(f"Error storing embeddings: {str(e)}")
+            return False
+
+    # TODO a natural language interface for filtering would be great (langchanin self querying, etc).
+    def _build_metadata_filter(self, filters: Dict[str, Any]) -> Dict[str, Any]:
+        """Build MongoDB filter for metadata fields.
+        
+        Converts user-provided filters into proper MongoDB metadata filters
+        and validates the filter values.
+        """
+        if not filters:
+            return {}
+            
+        metadata_filter = {}
+        for key, value in filters.items():
+            # Only allow filtering on metadata fields
+            metadata_key = f"metadata.{key}"
+            
+            # Handle different types of filter values
+            if isinstance(value, (str, int, float, bool)):
+                # Simple equality match
+                metadata_filter[metadata_key] = value
+            elif isinstance(value, list):
+                # Array contains or in operator
+                metadata_filter[metadata_key] = {"$in": value}
+            elif isinstance(value, dict):
+                # Handle comparison operators
+                valid_ops = {
+                    "gt": "$gt",
+                    "gte": "$gte", 
+                    "lt": "$lt",
+                    "lte": "$lte",
+                    "ne": "$ne"
+                }
+                mongo_ops = {}
+                for op, val in value.items():
+                    if op not in valid_ops:
+                        raise ValueError(f"Invalid operator: {op}")
+                    mongo_ops[valid_ops[op]] = val
+                metadata_filter[metadata_key] = mongo_ops
+            else:
+                raise ValueError(f"Unsupported filter value type for key {key}: {type(value)}")
+                
+        return metadata_filter
+
+    def query_similar(
+            self,
+            query_embedding: List[float],
+            k: int,
+            auth: AuthContext,
+            filters: Dict[str, Any] = None
+        ) -> List[DocumentChunk]:
+        """Find similar chunks using MongoDB Atlas Vector Search."""
+        try:
+            # Build access filter based on auth context
+            if auth.type == AuthType.DEVELOPER:
+                base_filter = {
+                    "$or": [
+                        {"system_metadata.dev_id": auth.dev_id},  # Dev's own docs
+                        {"permissions": {"$in": [auth.app_id]}}  # Docs app has access to
+                    ]
+                }
+            else:
+                base_filter = {"system_metadata.eu_id": auth.eu_id}  # User's docs
+            metadata_filter = self._build_metadata_filter(filters)
+            # Combine with any additional filters
+            filter_query = base_filter
+            if metadata_filter:
+                filter_query = {"$and": [base_filter, metadata_filter]}
+
+            pipeline = [
+                {
+                    "$vectorSearch": {
+                        "index": self.index_name,
+                        "path": "embedding",
+                        "queryVector": query_embedding,
+                        "numCandidates": k * 10,
+                        "limit": k,
+                        "filter": filter_query
+                    }
+                },
+                {
+                    "$project": {
+                        "score": {"$meta": "vectorSearchScore"},
+                        "content": 1,
+                        "metadata": 1,
+                        "system_metadata": 1,
+                        "source": 1,
+                        "permissions": 1,
+                        "_id": 0  # Don't need MongoDB's _id
+                    }
+                }
+            ]
+
+            results = list(self.collection.aggregate(pipeline))
+            chunks = []
+
+            for result in results:
+                chunk = DocumentChunk(
+                    content=result["content"],
+                    embedding=[],  # We don't need to send embeddings back
+                    metadata=result["metadata"],
+                    system_metadata=SystemMetadata(**result["system_metadata"]),
+                    source=Source(result["source"]),
+                    permissions=result.get("permissions", {})
+                )
+                # Add score from vector search
+                chunk.score = result.get("score", 0)
+                chunks.append(chunk)
+
+            return chunks
+
+        except Exception as e:
+            logger.error(f"Error querying similar documents: {str(e)}")
+            return []
+
+
+================================================================================
+
+core/vector_store/base_vector_store.py
+from abc import ABC, abstractmethod
+from typing import Any, Dict, List, Optional
+from core.document import AuthContext, DocumentChunk
+
+
+class BaseVectorStore(ABC):
+    @abstractmethod
+    def store_embeddings(self, chunks: List[DocumentChunk]) -> bool:
+        """Store document chunks and their embeddings"""
+        pass
+
+    @abstractmethod
+    def query_similar(self, query_embedding: List[float], k: int, auth: AuthContext, filters: Optional[Dict[str, Any]] = None) -> List[DocumentChunk]:
+        """Find similar chunks"""
+        pass
+
+
+================================================================================
+
+core/embedding_model/base_embedding_model.py
+from abc import ABC, abstractmethod
+from typing import List, Union
+
+
+class BaseEmbeddingModel(ABC):
+    @abstractmethod
+    async def embed_for_ingestion(self, text: Union[str, List[str]]) -> List[float]:
+        """Generate embeddings for input text"""
+        pass
+
+    @abstractmethod
+    async def embed_for_query(self, text: str) -> List[float]:
+        """Generate embeddings for input text"""
+        pass
+
+
+================================================================================
+
+core/embedding_model/openai_embedding_model.py
+from typing import List, Union
+from openai import OpenAI
+from .base_embedding_model import BaseEmbeddingModel
+
+
+class OpenAIEmbeddingModel(BaseEmbeddingModel):
+    def __init__(self, api_key: str, model_name: str = "text-embedding-3-small"):
+        self.client = OpenAI(api_key=api_key)
+        self.model_name = model_name
+
+    async def embed_for_ingestion(self, text: Union[str, List[str]]) -> List[List[float]]:
+        response = self.client.embeddings.create(
+            model=self.model_name,
+            input=text
+        )
+
+        return [item.embedding for item in response.data]
+
+    async def embed_for_query(self, text: str) -> List[float]:
+        response = self.client.embeddings.create(
+            model=self.model_name,
+            input=text
+        )
+
+        return response.data[0].embedding
+
+
+================================================================================
+
+core/embedding_model/voyageai_embedding_model.py
+from .base_embedding_model import BaseEmbeddingModel
+import os
+import voyageai
+from typing import List, Union
+from dotenv import load_dotenv
+
+class VoyageAIEmbeddingModel(BaseEmbeddingModel):
+    """
+    VoyageAI embedding model
+    """
+    load_dotenv()
+    def __init__(self):
+        self.client = voyageai.Client(api_key=os.getenv("VOYAGE_API_KEY"))
+
+    async def embed_for_ingestion(self, text: Union[str, List[str]]) -> List[List[float]]:
+        if isinstance(text, str):
+            batches = [[text]]
+        else:
+            # Split text into batches of 128
+            batches = [text[i:i + 128] for i in range(0, len(text), 128)]
+        embeddings = []
+        for batch in batches:
+            # dimensions of voyage 3 are 1024
+            embeddings.extend(self.client.embed(batch, model="voyage-3").embeddings)
+        return embeddings
+    
+    async def embed_for_query(self, text: str) -> List[float]:
+        return self.client.embed([text], model="voyage-3").embeddings[0]
+
+
+
+
+
+================================================================================
+
+sdks/python/setup.py
+from setuptools import setup, find_packages
+
+setup(
+    name="databridge-client",
+    version="0.1.1",
+    packages=find_packages(),
+    install_requires=[
+        "httpx",
+        "pyjwt",
+    ],
+    python_requires=">=3.7",
+)
+
+
+================================================================================
+
+sdks/python/databridge/client.py
+from typing import Dict, Any, List, Optional, Union
+import httpx
+from urllib.parse import urlparse
+import jwt
+from datetime import datetime, UTC
+import asyncio
+from dataclasses import dataclass
+from .exceptions import AuthenticationError
+from pydantic import BaseModel, Field
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class QueryResult:
+    """Structured query result"""
+    content: str
+    doc_id: str
+    score: Optional[float]
+    metadata: Dict[str, Any]
+
+# Request/Response Models
+class Document(BaseModel):
+    id: str
+    name: str
+    type: str
+    source: str
+    uploaded_at: str
+    size: str
+    redaction_level: str
+    stats: Dict[str, Union[int, str]] = Field(
+        default_factory=lambda: {
+            "ai_queries": 0,
+            "time_saved": "0h",
+            "last_accessed": ""
+        }
+    )
+    accessed_by: List[Dict[str, str]] = Field(default_factory=list)
+    sensitive_content: Optional[List[str]] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    s3_bucket: Optional[str] = None
+    s3_key: Optional[str] = None
+    presigned_url: Optional[str] = None
+
+
+class DataBridge:
+    """
+    DataBridge client for document ingestion and querying.
+
+    Usage:
+        db = DataBridge("databridge://owner123:token@databridge.local")
+        doc_id = await db.ingest_document("content", {"title": "My Doc"})
+        results = await db.query("What is...")
+    """
+    def __init__(
+        self,
+        uri: str,
+        timeout: int = 30,
+        max_retries: int = 3
+    ):
+        self._timeout = timeout
+        self._max_retries = max_retries
+        self._client = httpx.AsyncClient(timeout=timeout)
+        self._setup_auth(uri)
+
+    def _setup_auth(self, uri: str) -> None:
+        """Setup authentication from URI"""
+        try:
+            parsed = urlparse(uri)
+            if not parsed.netloc:
+                raise ValueError("Invalid URI format")
+            
+            split_uri = parsed.netloc.split('@')
+            self._base_url = f"{"http" if "localhost" in split_uri[1] else "https"}://{split_uri[1]}"
+            auth_parts = split_uri[0].split(':')
+            if len(auth_parts) != 2:
+                raise ValueError("URI must include owner_id and auth_token")
+
+            if '.' in auth_parts[0]:
+                self._owner_id = auth_parts[0]  # dev_id.app_id format
+                self._auth_token = auth_parts[1]
+            else:
+                self._owner_id = auth_parts[0]  # eu_id format
+                self._auth_token = auth_parts[1]
+
+            # Validate token structure (not signature)
+            try:
+                decoded = jwt.decode(self._auth_token, options={"verify_signature": False})
+                self._token_expiry = datetime.fromtimestamp(decoded['exp'], UTC)
+            except jwt.InvalidTokenError as e:
+                raise ValueError(f"Invalid auth token format: {str(e)}")
+
+        except Exception as e:
+            raise AuthenticationError(f"Failed to setup authentication: {str(e)}")
+
+    async def _make_request(
+        self,
+        method: str,
+        endpoint: str,
+        data: Dict[str, Any] = None,
+        retry_count: int = 0
+    ) -> Dict[str, Any]:
+        """Make authenticated HTTP request with retries"""
+        # if datetime.now(UTC) > self._token_expiry:
+        #     raise AuthenticationError("Authentication token has expired")
+        headers = {
+            "X-Owner-ID": self._owner_id,
+            "X-Auth-Token": self._auth_token,
+            "Content-Type": "application/json"
+        }
+
+        try:
+            response = await self._client.request(
+                method,
+                f"{self._base_url}/{endpoint.lstrip('/')}",
+                json=data,
+                headers=headers
+            )
+
+            response.raise_for_status()
+            return response.json()
+
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 401:
+                raise AuthenticationError("Authentication failed: " + str(e))
+            elif e.response.status_code >= 500 and retry_count < self._max_retries:
+                await asyncio.sleep(2 ** retry_count)  # Exponential backoff
+                return await self._make_request(method, endpoint, data, retry_count + 1)
+            else:
+                raise ConnectionError(f"Request failed: {e.response.text}")
+        except Exception as e:
+            logger.error(f"Request error: {str(e)}")
+            raise ConnectionError(f"Request failed: {str(e)}")
+
+    async def ingest_document(
+        self,
+        content: Union[str, bytes],
+        metadata: Optional[Dict[str, Any]] = None,
+        filename: Optional[str] = None
+    ) -> str:
+        """
+        Ingest a document into DataBridge.
+        
+        Args:
+            content: Document content (string or bytes)
+            metadata: Optional document metadata
+            filename: Optional filename - defaults to doc_id if not provided
+        Returns:
+            Document ID of the ingested document
+        """
+        try:
+            metadata = metadata or {}
+            if filename:
+                metadata["filename"] = filename
+
+            if isinstance(content, bytes):
+                import base64
+                content = base64.b64encode(content).decode()
+                metadata["is_base64"] = True
+
+            response = await self._make_request(
+                "POST",
+                "ingest",
+                {
+                    "content": content,
+                    "metadata": metadata
+                }
+            )
+
+            if not response or "document_id" not in response:
+                raise ValueError("Invalid response from server")
+
+            return response["document_id"]
+
+        except Exception as e:
+            logger.error(f"Ingestion error: {str(e)}")
+            raise ConnectionError(f"Document ingestion failed: {str(e)}")
+
+    async def query(
+        self,
+        query: str,
+        k: int = 4,
+        filters: Optional[Dict[str, Any]] = None
+    ) -> List[QueryResult]:
+        """
+        Query documents in DataBridge.
+        
+        Args:
+            query: Query string
+            k: Number of results to return
+            filters: Optional metadata filters
+
+        Returns:
+            List of QueryResult objects
+        """
+        response = await self._make_request(
+            "POST",
+            "query",
+            {
+                "query": query,
+                "k": k,
+                "filters": filters
+            }
+        )
+
+        return [
+            QueryResult(
+                content=result["content"],
+                doc_id=result["doc_id"],
+                score=result.get("score"),
+                metadata=result.get("metadata", {})
+            )
+            for result in response["results"]
+        ]
+    
+    async def get_documents(self) -> List[Document]:
+        """Get all documents"""
+        response = await self._make_request("GET", "documents")
+        return [Document(**doc) for doc in response]
+
+    async def close(self):
+        """Close the HTTP client"""
+        await self._client.aclose()
+
+    async def __aenter__(self):
+        """Async context manager entry"""
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit"""
+        await self.close()
+
+    def __repr__(self) -> str:
+        """Safe string representation"""
+        return f"DataBridge(owner_id='{self._owner_id}')"
+
+
+================================================================================
+
+sdks/python/databridge/exceptions.py
+class DataBridgeError(Exception):
+    """Base exception for DataBridge SDK"""
+    pass
+
+
+class AuthenticationError(DataBridgeError):
+    """Authentication related errors"""
+    pass
+
+
+class ConnectionError(DataBridgeError):
+    """Connection related errors"""
+    pass
+
+================================================================================
+
+sdks/python/examples/basic_usage.py
+import asyncio
+import os
+import sys
+from pathlib import Path
+from datetime import UTC, datetime, timedelta
+
+from dotenv import load_dotenv
+import jwt
+
+# pip install -e ./sdks/python
+from databridge import DataBridge, DataBridgeError
+
+
+def create_developer_test_uri():
+    """Create a test URI for developer"""
+    token = jwt.encode(
+        {
+            'type': 'developer',
+            'exp': datetime.now(UTC) + timedelta(days=30)
+        },
+        "your-secret-key-for-signing-tokens",
+        algorithm='HS256'
+    )
+    return f"databridge://673b64dcb6e40d739a9b6e2a:{token}@localhost:8001"
+
+
+def create_user_test_uri():
+    """Create a test URI for end user"""
+    token = jwt.encode(
+        {
+            'type': 'user',
+            'exp': datetime.now(UTC) + timedelta(days=30)
+        },
+        "your-secret-key-for-signing-tokens",
+        algorithm='HS256'
+    )
+    return f"databridge://user_789:{token}@localhost:8001"
+
+
+async def example_text():
+    """Example of ingesting and querying text documents"""
+    print("\n=== Text Document Example ===")
+    load_dotenv()
+    uri = os.getenv("DATABRIDGE_URI")
+    if not uri:
+        raise ValueError("Please set DATABRIDGE_URI environment variable")
+
+    db = DataBridge(create_developer_test_uri())
+    
+    try:
+        # Ingest a simple text document
+        content = """
+        Machine learning (ML) is a type of artificial intelligence (AI) that allows 
+        software applications to become more accurate at predicting outcomes without 
+        being explicitly programmed to do so. Machine learning algorithms use historical 
+        data as input to predict new output values.
+        """
+        
+        doc_id = await db.ingest_document(
+            content=content,
+            metadata={
+                "title": "ML Introduction",
+                "category": "tech",
+                "tags": ["ML", "AI", "technology"]
+            }
+        )
+        print(f"✓ Document ingested successfully (ID: {doc_id})")
+
+        # Query the document
+        results = await db.query(
+            query="What is machine learning?",
+            k=1  # Get top result,
+        )
+        
+        print("\nQuery Results:")
+        for result in results:
+            print(f"Content: {result.content.strip()}")
+            print(f"Score: {result.score:.2f}")
+            print(f"Metadata: {result.metadata}")
+
+    except DataBridgeError as e:
+        print(f"× Error: {str(e)}")
+    
+    finally:
+        await db.close()
+
+
+async def example_pdf():
+    """Example of ingesting and querying PDF documents"""
+    print("\n=== PDF Document Example ===")
+
+    # pdf_path = Path(__file__).parent / "sample.pdf"
+    pdf_path = Path(__file__).parent / "example.txt"
+    if not pdf_path.exists():
+        print("× example.txt not found in examples directory")
+        return
+
+    db = DataBridge(create_developer_test_uri())
+    
+    try:
+        # Read and ingest PDF
+        with open(pdf_path, "rb") as f:
+            pdf_content = f.read()
+        
+        print(f"PDF name: {pdf_path.name}")
+
+        doc_id = await db.ingest_document(
+            content=pdf_content,
+            filename=pdf_path.name,
+        )
+        print(f"✓ PDF ingested successfully (ID: {doc_id})")
+
+        # Query the PDF content
+        results = await db.query(
+            query="What advice did alice get from the caterpillar?",
+            k=3,  # Get top 5 results
+            # filters={"file_type": "pdf"}  # Only search PDF documents
+        )
+
+        # Write results to file
+        with open("query_results.txt", "w") as f:
+            f.write("Query Results:\n")
+            for i, result in enumerate(results, 1):
+                f.write(f"\nResult {i}:\n")
+                f.write(f"Content: {result.content[:200]}...\n")
+                f.write(f"Score: {result.score:.2f}\n")
+                f.write(f"Document ID: {result.doc_id}\n")
+
+    except DataBridgeError as e:
+        print(f"× Error: {str(e)}")
+
+    finally:
+        await db.close()
+
+
+async def example_batch():
+    """Example of batch operations"""
+    print("\n=== Batch Operations Example ===")
+    
+    uri = os.getenv("DATABRIDGE_URI")
+    if not uri:
+        raise ValueError("Please set DATABRIDGE_URI environment variable")
+
+    db = DataBridge(create_developer_test_uri())
+    
+    try:
+        # Prepare multiple documents
+        documents = [
+            {
+                "content": "Python is a programming language.",
+                "metadata": {"category": "programming", "level": "basic"}
+            },
+            {
+                "content": "JavaScript runs in the browser.",
+                "metadata": {"category": "programming", "level": "basic"}
+            },
+            {
+                "content": "Docker containers package applications.",
+                "metadata": {"category": "devops", "level": "intermediate"}
+            }
+        ]
+
+        # Ingest multiple documents
+        doc_ids = []
+        for doc in documents:
+            doc_id = await db.ingest_document(
+                content=doc["content"],
+                metadata=doc["metadata"]
+            )
+            doc_ids.append(doc_id)
+        print(f"✓ Ingested {len(doc_ids)} documents")
+
+        # Query with filters
+        results = await db.query(
+            query="What is Python?",
+            filters={"category": "programming"}
+        )
+        
+        print("\nQuery Results (Programming category only):")
+        for result in results:
+            print(f"\nContent: {result.content}")
+            print(f"Category: {result.metadata['category']}")
+            print(f"Level: {result.metadata['level']}")
+
+    except DataBridgeError as e:
+        print(f"× Error: {str(e)}")
+    
+    finally:
+        await db.close()
+
+
+async def example_get_documents():
+    """Example of getting documents"""
+    print("\n=== Get Documents Example ===")
+
+    db = DataBridge(create_developer_test_uri())
+    documents = await db.get_documents()
+    print(documents)
+
+async def main():
+    """Run all examples"""
+    try:
+        # await example_text()
+        await example_pdf()
+        # await example_batch()
+        # await example_get_documents()
+    except Exception as e:
+        print(f"× Main error: {str(e)}")
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+================================================================================
+
+sanity_checks/mongo.py
+from pymongo import MongoClient
+from dotenv import load_dotenv
+import os
+import datetime
+
+
+def test_mongo_operations():
+    # Load environment variables
+    load_dotenv()
+
+    # Get MongoDB URI from environment variable
+    mongo_uri = os.getenv("MONGODB_URI")
+    if not mongo_uri:
+        raise ValueError("MONGODB_URI environment variable not set")
+
+    try:
+        # Connect to MongoDB
+        client = MongoClient(mongo_uri)
+
+        # Test connection
+        client.admin.command('ping')
+        print("✅ Connected successfully to MongoDB")
+
+        # Get database and collection
+        db = client.brandsyncaidb  # Using a test database
+        collection = db.kb_chunked_embeddings
+
+        # Insert a single document
+        test_doc = {
+            "name": "Test Document",
+            "timestamp": datetime.datetime.now(),
+            "value": 42
+        }
+
+        result = collection.insert_one(test_doc)
+        print(f"✅ Inserted document with ID: {result.inserted_id}")
+
+        # Insert multiple documents
+        test_docs = [
+            {"name": "Doc 1", "value": 1},
+            {"name": "Doc 2", "value": 2},
+            {"name": "Doc 3", "value": 3}
+        ]
+
+        result = collection.insert_many(test_docs)
+        print(f"✅ Inserted {len(result.inserted_ids)} documents")
+
+        # Retrieve documents
+        print("\nRetrieving documents:")
+        for doc in collection.find():
+            print(f"Found document: {doc}")
+
+        # Find specific documents
+        print("\nFinding documents with value >= 2:")
+        query = {"value": {"$gte": 2}}
+        for doc in collection.find(query):
+            print(f"Found document: {doc}")
+
+        # Clean up - delete all test documents
+        # DON'T DELETE IF It'S BRANDSYNCAI
+        # result = collection.delete_many({})
+        print(f"\n✅ Cleaned up {result.deleted_count} test documents")
+
+    except Exception as e:
+        print(f"❌ Error: {str(e)}")
+    finally:
+        client.close()
+        print("\n✅ Connection closed")
+
+
+if __name__ == "__main__":
+    test_mongo_operations()
+
+
+================================================================================
+

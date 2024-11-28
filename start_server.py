@@ -25,7 +25,8 @@ def main():
         "core.api:app",
         host="0.0.0.0",  # Listen on all available interfaces
         port=8000,
-        reload=True  # Enable auto-reload during development
+        reload=True,  # Enable auto-reload during development
+        loop="asyncio"
     )
 
 if __name__ == "__main__":

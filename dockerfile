@@ -4,10 +4,14 @@ FROM python:3.12.5-slim
 # Set working directory
 WORKDIR /app
 
-# Unstructured.io dependencies
-RUN apt-get update && apt-get install ffmpeg libsm6 libxext6 libmagic1 -y
+# Install system dependencies including curl for healthchecks
 RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    libsm6 \
+    libxext6 \
+    libmagic1 \
     tesseract-ocr \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements and install dependencies
@@ -19,15 +23,9 @@ COPY . .
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
-# # Copy and load environment variables from .env file
-# COPY .env .
-# ENV $(cat .env | xargs)
 
-
-
-# Expose port
+# Expose ports
 EXPOSE 8000 443 80 20
 
 # Run the server
-# CMD ["python", "start_server.py"]
 CMD ["uvicorn", "core.api:app", "--host", "0.0.0.0", "--port", "443"]

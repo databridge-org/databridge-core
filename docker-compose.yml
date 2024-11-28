@@ -1,0 +1,44 @@
+# docker-compose.yml
+version: '3.8'
+
+services:
+  app:
+    build: .
+    ports:
+      - "443:443"
+      - "80:80"
+      - "8000:8000"
+    environment:
+      - ELASTICSEARCH_HOST=http://elasticsearch:9200
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    networks:
+      - app-network
+
+  elasticsearch:
+    image: elasticsearch:8.8.0
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"  # Limit memory usage
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9200"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - app-network
+      
+volumes:
+  elasticsearch-data:
+
+networks:
+  app-network:
+    driver: bridge

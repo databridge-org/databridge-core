@@ -90,9 +90,9 @@ async def example_pdf():
     print("\n=== PDF Document Example ===")
 
     # pdf_path = Path(__file__).parent / "sample.pdf"
-    pdf_path = Path(__file__).parent / "trial.png"
+    pdf_path = Path(__file__).parent / "example.txt"
     if not pdf_path.exists():
-        print("× sample.pdf not found in examples directory")
+        print("× example.txt not found in examples directory")
         return
 
     db = DataBridge(create_developer_test_uri())
@@ -101,30 +101,30 @@ async def example_pdf():
         # Read and ingest PDF
         with open(pdf_path, "rb") as f:
             pdf_content = f.read()
+        
+        print(f"PDF name: {pdf_path.name}")
 
         doc_id = await db.ingest_document(
             content=pdf_content,
-            # metadata={
-            #     "title": "Sample Document",
-            #     "source": "examples",
-            #     "file_type": "pdf"
-            # }
+            filename=pdf_path.name,
         )
         print(f"✓ PDF ingested successfully (ID: {doc_id})")
 
         # Query the PDF content
         results = await db.query(
-            query="Brandsync repair!",
-            k=2,  # Get top 2 results
+            query="What advice did alice get from the caterpillar?",
+            k=3,  # Get top 5 results
             # filters={"file_type": "pdf"}  # Only search PDF documents
         )
 
-        print("\nQuery Results:")
-        for i, result in enumerate(results, 1):
-            print(f"\nResult {i}:")
-            print(f"Content: {result.content[:200]}...")
-            print(f"Score: {result.score:.2f}")
-            print(f"Document ID: {result.doc_id}")
+        # Write results to file
+        with open("query_results.txt", "w") as f:
+            f.write("Query Results:\n")
+            for i, result in enumerate(results, 1):
+                f.write(f"\nResult {i}:\n")
+                f.write(f"Content: {result.content[:200]}...\n")
+                f.write(f"Score: {result.score:.2f}\n")
+                f.write(f"Document ID: {result.doc_id}\n")
 
     except DataBridgeError as e:
         print(f"× Error: {str(e)}")
@@ -201,9 +201,9 @@ async def main():
     """Run all examples"""
     try:
         # await example_text()
-        # await example_pdf()
+        await example_pdf()
         # await example_batch()
-        await example_get_documents()
+        # await example_get_documents()
     except Exception as e:
         print(f"× Main error: {str(e)}")
 
