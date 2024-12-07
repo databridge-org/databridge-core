@@ -1,10 +1,11 @@
+import json
 from typing import Dict, Any, List, Optional, Union, BinaryIO
 import httpx
 from urllib.parse import urlparse
 import jwt
 from pydantic import BaseModel
-import json
 from pathlib import Path
+from io import BytesIO
 
 
 class IngestTextRequest(BaseModel):
@@ -189,9 +190,10 @@ class DataBridge:
             file_path = Path(file)
             if not file_path.exists():
                 raise ValueError(f"File not found: {file}")
-            file_obj = open(file_path, "rb")
+            with open(file_path, "rb") as f:
+                content = f.read()
+                file_obj = BytesIO(content)
         elif isinstance(file, bytes):
-            from io import BytesIO
             file_obj = BytesIO(file)
         else:
             file_obj = file
@@ -201,7 +203,7 @@ class DataBridge:
             files = {
                 "file": (filename, file_obj, content_type or "application/octet-stream")
             }
-            
+
             # Add metadata
             data = {"metadata": json.dumps(metadata or {})}
 
@@ -227,17 +229,17 @@ class DataBridge:
     ) -> Union[List[ChunkResult], List[DocumentResult]]:
         """
         Query documents in DataBridge.
-        
+
         Args:
             query: Search query text
             return_type: Type of results ("chunks" or "documents")
             filters: Optional metadata filters
             k: Number of results (default: 4)
             min_score: Minimum similarity threshold (default: 0.0)
-        
+
         Returns:
             List[ChunkResult] or List[DocumentResult] depending on return_type
-        
+
         Example:
             ```python
             # Query for chunks
@@ -246,7 +248,7 @@ class DataBridge:
                 return_type="chunks",
                 filters={"department": "research"}
             )
-            
+
             # Query for documents
             docs = await db.query(
                 "machine learning",
@@ -264,7 +266,7 @@ class DataBridge:
         }
 
         response = await self._request("POST", "query", request)
-        
+
         if return_type == "chunks":
             return [ChunkResult(**r) for r in response]
         return [DocumentResult(**r) for r in response]
@@ -272,15 +274,17 @@ class DataBridge:
     async def list_documents(
         self,
         skip: int = 0,
-        limit: int = 100
+        limit: int = 100,
+        filters: Optional[Dict[str, Any]] = None
     ) -> List[Document]:
         """
-        List accessible documents with pagination.
+        List accessible documents.
         
         Args:
             skip: Number of documents to skip
             limit: Maximum number of documents to return
-        
+            filters: Optional filters
+
         Returns:
             List[Document]: List of accessible documents
         
@@ -290,12 +294,12 @@ class DataBridge:
             docs = await db.list_documents(limit=10)
             
             # Get next page
-            next_page = await db.list_documents(skip=10, limit=10)
+            next_page = await db.list_documents(skip=10, limit=10, filters={"department": "research"})
             ```
         """
         response = await self._request(
             "GET",
-            f"documents?skip={skip}&limit={limit}"
+            f"documents?skip={skip}&limit={limit}&filters={filters}"
         )
         return [Document(**doc) for doc in response]
 

@@ -1,6 +1,6 @@
 import json
 from datetime import datetime, UTC
-from typing import List, Union
+from typing import Any, Dict, List, Optional, Union
 from fastapi import (
     FastAPI,
     Form,
@@ -127,8 +127,6 @@ async def ingest_text(
         return await document_service.ingest_text(request, auth)
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.post("/ingest/file", response_model=Document)
@@ -141,13 +139,11 @@ async def ingest_file(
     try:
         metadata_dict = json.loads(metadata)
         doc = await document_service.ingest_file(file, metadata_dict, auth)
-        return doc  # Should just send a success response, not sure why we're sending a document #TODO: discuss with bhau
+        return doc  # TODO: Might be lighter on network to just send the document ID.
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
     except json.JSONDecodeError:
         raise HTTPException(400, "Invalid metadata JSON")
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.post("/query", response_model=Union[List[ChunkResult], List[DocumentResult]])
@@ -156,24 +152,18 @@ async def query_documents(
     auth: AuthContext = Depends(verify_token)
 ):
     """Query documents with specified return type."""
-    try:
-        return await document_service.query(request, auth)
-    except Exception as e:
-        logger.error(f"Query failed: {str(e)}")
-        raise HTTPException(status_code=400, detail=str(e))
+    return await document_service.query(request, auth)
 
 
 @app.get("/documents", response_model=List[Document])
 async def list_documents(
     auth: AuthContext = Depends(verify_token),
     skip: int = 0,
-    limit: int = 100
+    limit: int = 100,
+    filters: Optional[Dict[str, Any]] = None
 ):
     """List accessible documents."""
-    try:
-        return await document_service.db.get_documents(auth, skip, limit)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    return await document_service.db.get_documents(auth, skip, limit, filters)
 
 
 @app.get("/documents/{document_id}", response_model=Document)
@@ -189,6 +179,5 @@ async def get_document(
             raise HTTPException(status_code=404, detail="Document not found")
         return doc
     except HTTPException as e:
-        raise e  # Return the HTTPException as is
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        logger.error(f"Error getting document: {e}")
+        raise e

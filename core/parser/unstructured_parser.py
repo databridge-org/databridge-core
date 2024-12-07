@@ -1,7 +1,7 @@
 from typing import List
 import io
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from unstructured.partition.auto import partition
+from langchain_unstructured import UnstructuredLoader
 import logging
 
 from .base_parser import BaseParser
@@ -26,30 +26,17 @@ class UnstructuredAPIParser(BaseParser):
 
     async def split_text(self, text: str) -> List[str]:
         """Split plain text into chunks"""
-        try:
-            return self.text_splitter.split_text(text)
-        except Exception as e:
-            logger.error(f"Failed to split text: {str(e)}")
-            raise
+        return self.text_splitter.split_text(text)
 
     async def parse_file(self, file: bytes, content_type: str) -> List[str]:
         """Parse file content using unstructured"""
-        try:
-            # Parse with unstructured
-            elements = partition(
-                file=io.BytesIO(file),
-                content_type=content_type,
-                api_key=self.api_key
-            )
-
-            # Extract text from elements
-            chunks = []
-            for element in elements:
-                if hasattr(element, 'text') and element.text:
-                    chunks.append(element.text.strip())
-
-            return chunks
-
-        except Exception as e:
-            logger.error(f"Failed to parse file: {str(e)}")
-            raise e
+        # Parse with unstructured
+        loader = UnstructuredLoader(
+            file=io.BytesIO(file),
+            content_type=content_type,
+            partition_via_api=True,
+            api_key=self.api_key,
+            chunking_strategy="by_title"
+        )
+        elements = loader.load()
+        return [element.page_content for element in elements]

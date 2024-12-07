@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 class S3Storage(BaseStorage):
     """AWS S3 storage implementation."""
     
+    # TODO: Remove hardcoded values.
     def __init__(
         self,
         aws_access_key: str,

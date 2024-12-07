@@ -24,16 +24,14 @@ class LocalDataBridge(DataBridge):
             self._base_url = self._base_url.replace("https://", "http://")
 
 
-# Get DataBridge URI from environment
-# Format: databridge://owner_id:token@host
-DATABRIDGE_URI = "databridge://test_dev:eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0eXBlIjoiZGV2ZWxvcGVyIiwiZW50aXR5X2lkIjoidGVzdF9kZXYiLCJwZXJtaXNzaW9ucyI6WyJyZWFkIiwid3JpdGUiLCJhZG1pbiJdLCJleHAiOjE3MzU3ODk3NTd9.lYL1czdIeclMIl8BohTd3C9lpnvMi1gdNGpiec9sXv4@127.0.0.1:8000"
-print(f"DATABRIDGE_URI: {DATABRIDGE_URI}")
+# Can be generated using generate_local_uri.py
+DATABRIDGE_URI = ""
 
 
 async def demonstrate_text_ingestion(db: LocalDataBridge):
     """Demonstrate text document ingestion"""
     print("\n=== Text Ingestion Example ===")
-    
+
     # Ingest a text document with metadata
     doc = await db.ingest_text(
         content=(
@@ -49,25 +47,25 @@ async def demonstrate_text_ingestion(db: LocalDataBridge):
             "difficulty": "intermediate"
         }
     )
-    
+
     print("✓ Text document ingested")
     print(f"  ID: {doc.external_id}")
     print(f"  Content Type: {doc.content_type}")
     print(f"  Tags: {doc.metadata.get('tags')}")
-    
+
     return doc.external_id
 
 
 async def demonstrate_file_ingestion(db: LocalDataBridge):
     """Demonstrate file document ingestion"""
     print("\n=== File Ingestion Example ===")
-    
+
     # Create a sample PDF file
     pdf_path = Path("sample.pdf")
     if not pdf_path.exists():
         print("× Sample PDF not found, skipping file ingestion")
         return
-    
+
     # Method 1: Ingest using file path
     doc1 = await db.ingest_file(
         file=pdf_path,
@@ -82,7 +80,7 @@ async def demonstrate_file_ingestion(db: LocalDataBridge):
     print("✓ File ingested from path")
     print(f"  ID: {doc1.external_id}")
     print(f"  Storage Info: {doc1.storage_info}")
-    
+
     # Method 2: Ingest using file object
     with open(pdf_path, "rb") as f:
         doc2 = await db.ingest_file(
@@ -92,14 +90,14 @@ async def demonstrate_file_ingestion(db: LocalDataBridge):
         )
     print("✓ File ingested from file object")
     print(f"  ID: {doc2.external_id}")
-    
+
     return doc1.external_id
 
 
 async def demonstrate_querying(db: LocalDataBridge, doc_id: str):
     """Demonstrate document querying"""
     print("\n=== Querying Example ===")
-    
+
     # Query 1: Search for chunks
     print("\nSearching for chunks about machine learning:")
     chunks = await db.query(
@@ -108,12 +106,12 @@ async def demonstrate_querying(db: LocalDataBridge, doc_id: str):
         k=2,
         filters={"category": "technical"}
     )
-    
+
     for chunk in chunks:
         print(f"\nChunk from document {chunk.document_id}")
         print(f"Score: {chunk.score:.2f}")
         print(f"Content: {chunk.content[:200]}...")
-    
+
     # Query 2: Search for documents
     print("\nSearching for documents about deep learning:")
     docs = await db.query(
@@ -121,7 +119,7 @@ async def demonstrate_querying(db: LocalDataBridge, doc_id: str):
         return_type="documents",
         filters={"tags": ["ML", "AI"]}
     )
-    
+
     for doc in docs:
         print(f"\nDocument: {doc.document_id}")
         print(f"Score: {doc.score:.2f}")
@@ -131,13 +129,13 @@ async def demonstrate_querying(db: LocalDataBridge, doc_id: str):
 async def demonstrate_document_management(db: LocalDataBridge):
     """Demonstrate document management operations"""
     print("\n=== Document Management Example ===")
-    
+
     # List documents with pagination
     print("\nListing first 5 documents:")
     docs = await db.list_documents(limit=5)
     for doc in docs:
         print(f"- {doc.external_id}: {doc.metadata.get('title', 'Untitled')}")
-    
+
     if docs:
         # Get specific document details
         doc_id = docs[0].external_id

@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import logging
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo.errors import PyMongoError
@@ -41,11 +41,11 @@ class MongoDBAtlasVectorStore(BaseVectorStore):
             logger.error(f"Error initializing vector store indexes: {str(e)}")
             return False
 
-    async def store_embeddings(self, chunks: List[DocumentChunk]) -> bool:
+    async def store_embeddings(self, chunks: List[DocumentChunk]) -> Tuple[bool, List[str]]:
         """Store document chunks with their embeddings."""
         try:
             if not chunks:
-                return True
+                return True, []
 
             # Convert chunks to dicts
             documents = []
@@ -65,12 +65,12 @@ class MongoDBAtlasVectorStore(BaseVectorStore):
                 result = await self.collection.insert_many(
                     documents, ordered=False
                 )
-                return len(result.inserted_ids) > 0, result
-            return False, None
+                return len(result.inserted_ids) > 0, [str(id) for id in result.inserted_ids]
+            return False, []
 
         except PyMongoError as e:
             logger.error(f"Error storing embeddings: {str(e)}")
-            return False
+            return False, []
 
     async def query_similar(
         self,

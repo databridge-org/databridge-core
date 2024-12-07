@@ -7,10 +7,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-class EntityType(str, Enum):
-    USER = "user"
-    DEVELOPER = "developer"
-
 
 class QueryReturnType(str, Enum):
     CHUNKS = "chunks"
@@ -68,7 +64,7 @@ class ChunkResult(BaseModel):
 
 class DocumentContent(BaseModel):
     """Represents either a URL or content string"""
-    type: Literal["url", "string"] 
+    type: Literal["url", "string"]
     value: str
     filename: Optional[str] = Field(None, description="Filename when type is url")
 

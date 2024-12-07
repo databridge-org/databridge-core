@@ -45,53 +45,49 @@ class DocumentService:
     ) -> Document:
         """Ingest a text document."""
         if "write" not in auth.permissions:
+            logger.error(f"User {auth.entity_id} does not have write permission")
             raise PermissionError("User does not have write permission")
-        try:
-            # 1. Create document record
-            doc = Document(
-                content_type="text/plain",
-                metadata=request.metadata,
-                owner={
-                    "type": auth.entity_type,
-                    "id": auth.entity_id
-                },
-                access_control={
-                    "readers": [auth.entity_id],
-                    "writers": {auth.entity_id},
-                    "admins": {auth.entity_id}
-                }
-            )
-            logger.info(f"Created text document record with ID {doc.external_id}")
 
-            # 2. Parse content into chunks
-            chunks = await self.parser.split_text(request.content)
-            if not chunks:
-                raise ValueError("No content chunks extracted from text")
-            logger.info(f"Split text into {len(chunks)} chunks")
+        # 1. Create document record
+        doc = Document(
+            content_type="text/plain",
+            metadata=request.metadata,
+            owner={
+                "type": auth.entity_type,
+                "id": auth.entity_id
+            },
+            access_control={
+                "readers": [auth.entity_id],
+                "writers": [auth.entity_id],
+                "admins": [auth.entity_id]
+            }
+        )
+        logger.info(f"Created text document record with ID {doc.external_id}")
 
-            # 3. Generate embeddings for chunks
-            embeddings = await self.embedding_model.embed_for_ingestion(chunks)
-            logger.info(f"Generated {len(embeddings)} embeddings")
+        # 2. Parse content into chunks
+        chunks = await self.parser.split_text(request.content)
+        if not chunks:
+            raise ValueError("No content chunks extracted from text")
+        logger.info(f"Split text into {len(chunks)} chunks")
 
-            # 4. Create and store chunk objects
-            chunk_objects = self._create_chunk_objects(
-                doc.external_id,
-                chunks,
-                embeddings,
-                doc.metadata
-            )
-            logger.info(f"Created {len(chunk_objects)} chunk objects")
+        # 3. Generate embeddings for chunks
+        embeddings = await self.embedding_model.embed_for_ingestion(chunks)
+        logger.info(f"Generated {len(embeddings)} embeddings")
 
-            # 5. Store everything
-            await self._store_chunks_and_doc(chunk_objects, doc)
-            logger.info(f"Successfully stored text document {doc.external_id}")
+        # 4. Create and store chunk objects
+        chunk_objects = self._create_chunk_objects(
+            doc.external_id,
+            chunks,
+            embeddings,
+            doc.metadata
+        )
+        logger.info(f"Created {len(chunk_objects)} chunk objects")
 
-            return doc
+        # 5. Store everything
+        await self._store_chunks_and_doc(chunk_objects, doc)
+        logger.info(f"Successfully stored text document {doc.external_id}")
 
-        except Exception as e:
-            logger.error(f"Text document ingestion failed: {str(e)}")
-            # TODO: Clean up any stored data on failure
-            raise e
+        return doc
 
     async def ingest_file(
         self,
@@ -102,68 +98,63 @@ class DocumentService:
         """Ingest a file document."""
         if "write" not in auth.permissions:
             raise PermissionError("User does not have write permission")
-        try:
-            # 1. Create document record
-            doc = Document(
-                content_type=file.content_type,
-                filename=file.filename,
-                metadata=metadata,
-                owner={
-                    "type": auth.entity_type,
-                    "id": auth.entity_id
-                },
-                access_control={
-                    "readers": [auth.entity_id],
-                    "writers": {auth.entity_id},
-                    "admins": {auth.entity_id}
-                }
-            )
-            logger.info(f"Created file document record with ID {doc.external_id}")
 
-            # 2. Read and store file
-            file_content = await file.read()
-            storage_info = await self.storage.upload_from_base64(
-                base64.b64encode(file_content).decode(),
-                doc.external_id,
-                file.content_type
-            )
-            doc.storage_info = {
-                "bucket": storage_info[0],
-                "key": storage_info[1]
+        # 1. Create document record
+        doc = Document(
+            content_type=file.content_type,
+            filename=file.filename,
+            metadata=metadata,
+            owner={
+                "type": auth.entity_type,
+                "id": auth.entity_id
+            },
+            access_control={
+                "readers": [auth.entity_id],
+                "writers": [auth.entity_id],
+                "admins": [auth.entity_id]
             }
-            logger.info(
-                f"Stored file in bucket `{storage_info[0]}` with key `{storage_info[1]}`"
-            )
+        )
+        logger.info(f"Created file document record with ID {doc.external_id}")
 
-            # 3. Parse content into chunks
-            chunks = await self.parser.parse_file(file_content, file.content_type)
-            if not chunks:
-                raise ValueError("No content chunks extracted from file")
-            logger.info(f"Parsed file into {len(chunks)} chunks")
+        # 2. Read and store file
+        file_content = await file.read()
+        storage_info = await self.storage.upload_from_base64(
+            base64.b64encode(file_content).decode(),
+            doc.external_id,
+            file.content_type
+        )
+        doc.storage_info = {
+            "bucket": storage_info[0],
+            "key": storage_info[1]
+        }
+        logger.info(
+            f"Stored file in bucket `{storage_info[0]}` with key `{storage_info[1]}`"
+        )
 
-            # 4. Generate embeddings for chunks
-            embeddings = await self.embedding_model.embed_for_ingestion(chunks)
-            logger.info(f"Generated {len(embeddings)} embeddings")
+        # 3. Parse content into chunks
+        chunks = await self.parser.parse_file(file_content, file.content_type)
+        if not chunks:
+            raise ValueError("No content chunks extracted from file")
+        logger.info(f"Parsed file into {len(chunks)} chunks")
 
-            # 5. Create and store chunk objects
-            chunk_objects = self._create_chunk_objects(
-                doc.external_id,
-                chunks,
-                embeddings,
-                doc.metadata
-            )
-            logger.info(f"Created {len(chunk_objects)} chunk objects")
+        # 4. Generate embeddings for chunks
+        embeddings = await self.embedding_model.embed_for_ingestion(chunks)
+        logger.info(f"Generated {len(embeddings)} embeddings")
 
-            # 6. Store everything
-            doc.chunk_ids = await self._store_chunks_and_doc(chunk_objects, doc)
-            logger.info(f"Successfully stored file document {doc.external_id}")
+        # 5. Create and store chunk objects
+        chunk_objects = self._create_chunk_objects(
+            doc.external_id,
+            chunks,
+            embeddings,
+            doc.metadata
+        )
+        logger.info(f"Created {len(chunk_objects)} chunk objects")
 
-            return doc
+        # 6. Store everything
+        doc.chunk_ids = await self._store_chunks_and_doc(chunk_objects, doc)
+        logger.info(f"Successfully stored file document {doc.external_id}")
 
-        except Exception as e:
-            logger.error(f"File document ingestion failed: {str(e)}")
-            # TODO: Clean up any stored data on failure
-            raise
+        return doc
 
     async def query(
         self,
@@ -171,39 +162,37 @@ class DocumentService:
         auth: AuthContext
     ) -> Union[List[ChunkResult], List[DocumentResult]]:
         """Query documents with specified return type."""
-        try:
-            # 1. Get embedding for query
-            query_embedding = await self.embedding_model.embed_for_query(request.query)
-            logger.info("Generated query embedding")
+        # TODO: k does not make sense for Documents, it's about chunks. 
+        # We should also look into document ordering. Figure these out.
+        
+        # 1. Get embedding for query
+        query_embedding = await self.embedding_model.embed_for_query(request.query)
+        logger.info("Generated query embedding")
 
-            # 2. Find authorized documents
-            doc_ids = await self.db.find_documents(auth, request.filters)
-            if not doc_ids:
-                logger.info("No authorized documents found")
-                return []
-            logger.info(f"Found {len(doc_ids)} authorized documents")
+        # 2. Find authorized documents
+        doc_ids = await self.db.find_authorized_and_filtered_documents(auth, request.filters)
+        if not doc_ids:
+            logger.info("No authorized documents found")
+            return []
+        logger.info(f"Found {len(doc_ids)} authorized documents")
 
-            # 3. Search chunks with vector similarity
-            chunks = await self.vector_store.query_similar(
-                query_embedding,
-                k=request.k,
-                doc_ids=doc_ids,
-            )
-            logger.info(f"Found {len(chunks)} similar chunks")
+        # 3. Search chunks with vector similarity
+        chunks = await self.vector_store.query_similar(
+            query_embedding,
+            k=request.k,
+            doc_ids=doc_ids,
+        )
+        logger.info(f"Found {len(chunks)} similar chunks")
 
-            # 4. Return results in requested format
-            if request.return_type == QueryReturnType.CHUNKS:
-                results = await self._create_chunk_results(auth, chunks)
-                logger.info(f"Returning {len(results)} chunk results")
-                return results
-            else:
-                results = await self._create_document_results(auth, chunks)
-                logger.info(f"Returning {len(results)} document results")
-                return results
-
-        except Exception as e:
-            logger.error(f"Query failed: {str(e)}")
-            raise e
+        # 4. Return results in requested format
+        if request.return_type == QueryReturnType.CHUNKS:
+            results = await self._create_chunk_results(auth, chunks)
+            logger.info(f"Returning {len(results)} chunk results")
+            return results
+        else:
+            results = await self._create_document_results(auth, chunks)
+            logger.info(f"Returning {len(results)} document results")
+            return results
 
     def _create_chunk_objects(
         self,
@@ -240,8 +229,8 @@ class DocumentService:
         if not await self.db.store_document(doc):
             raise Exception("Failed to store document metadata")
         logger.debug("Stored document metadata in database")
-
-        return [str(id) for id in result.inserted_ids]
+        logger.debug(f"Chunk IDs stored: {result}")
+        return result
 
     async def _create_chunk_results(
         self,

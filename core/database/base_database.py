@@ -62,17 +62,14 @@ class BaseDatabase(ABC):
         Returns: Success status
         """
         pass
-
+    
     @abstractmethod
-    async def find_documents(
+    async def find_authorized_and_filtered_documents(
         self,
         auth: AuthContext,
         filters: Optional[Dict[str, Any]] = None
     ) -> List[str]:
-        """
-        Find document IDs matching filters that user has access to.
-        Returns: List of document IDs
-        """
+        """Find document IDs matching filters that user has access to."""
         pass
 
     @abstractmethod

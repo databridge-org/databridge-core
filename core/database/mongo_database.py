@@ -152,7 +152,7 @@ class MongoDatabase(BaseDatabase):
             logger.error(f"Error deleting document: {str(e)}")
             return False
 
-    async def find_documents(
+    async def find_authorized_and_filtered_documents(
         self,
         auth: AuthContext,
         filters: Optional[Dict[str, Any]] = None
