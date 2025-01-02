@@ -22,6 +22,7 @@ from core.services.document_service import DocumentService
 from core.services.telemetry import TelemetryService
 from core.config import get_settings
 from core.database.mongo_database import MongoDatabase
+from core.database.postgres_database import PostgresDatabase
 from core.vector_store.mongo_vector_store import MongoDBAtlasVectorStore
 from core.storage.s3_storage import S3Storage
 from core.storage.local_storage import LocalStorage
@@ -54,7 +55,13 @@ settings = get_settings()
 
 # Initialize database
 match settings.DATABASE_PROVIDER:
+    case "postgres":
+        if not settings.POSTGRES_URI:
+            raise ValueError("PostgreSQL URI is required for PostgreSQL database")
+        database = PostgresDatabase(uri=settings.POSTGRES_URI)
     case "mongodb":
+        if not settings.MONGODB_URI:
+            raise ValueError("MongoDB URI is required for MongoDB database")
         database = MongoDatabase(
             uri=settings.MONGODB_URI,
             db_name=settings.DATABRIDGE_DB,

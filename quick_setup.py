@@ -43,12 +43,19 @@ with open(config_path, "rb") as f:
 
 # Extract configuration values
 STORAGE_PROVIDER = CONFIG["service"]["components"]["storage"]
-DATABASE_NAME = CONFIG["database"]["mongodb"]["database_name"]
+DATABASE_PROVIDER = CONFIG["service"]["components"]["database"]
+DATABASE_NAME = CONFIG["database"][DATABASE_PROVIDER]["database_name"]
+
+# MongoDB specific config
 DOCUMENTS_COLLECTION = CONFIG["database"]["mongodb"]["documents_collection"]
 CHUNKS_COLLECTION = CONFIG["database"]["mongodb"]["chunks_collection"]
 VECTOR_DIMENSIONS = CONFIG["vector_store"]["mongodb"]["dimensions"]
 VECTOR_INDEX_NAME = CONFIG["vector_store"]["mongodb"]["index_name"]
 SIMILARITY_METRIC = CONFIG["vector_store"]["mongodb"]["similarity_metric"]
+
+# PostgreSQL specific config
+DOCUMENTS_TABLE = CONFIG["database"]["postgres"]["documents_table"]
+CHUNKS_TABLE = CONFIG["database"]["postgres"]["chunks_table"]
 
 # Extract storage-specific configuration
 DEFAULT_REGION = CONFIG["storage"]["aws"]["region"] if STORAGE_PROVIDER == "aws-s3" else None
@@ -170,6 +177,40 @@ def setup_mongodb():
         LOGGER.info("MongoDB connection closed.")
 
 
+def setup_postgres():
+    """
+    Set up PostgreSQL database and tables with proper indexes.
+    """
+    import asyncio
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    # Load PostgreSQL URI from .env file
+    postgres_uri = os.getenv("POSTGRES_URI")
+    if not postgres_uri:
+        raise ValueError("POSTGRES_URI not found in .env file.")
+
+    async def _setup_postgres():
+        try:
+            # Create async engine
+            engine = create_async_engine(postgres_uri)
+
+            async with engine.begin() as conn:
+                # Import and create all tables
+                from core.database.postgres_database import Base
+
+                await conn.run_sync(Base.metadata.create_all)
+                LOGGER.info("Created all PostgreSQL tables and indexes.")
+
+            await engine.dispose()
+            LOGGER.info("PostgreSQL setup completed successfully.")
+
+        except Exception as e:
+            LOGGER.error(f"Failed to setup PostgreSQL: {e}")
+            raise
+
+    asyncio.run(_setup_postgres())
+
+
 def setup():
     # Setup S3 if configured
     if STORAGE_PROVIDER == "aws-s3":
@@ -177,9 +218,19 @@ def setup():
         create_s3_bucket(DEFAULT_BUCKET_NAME, DEFAULT_REGION)
         LOGGER.info("S3 bucket setup completed.")
 
-    LOGGER.info("Setting up MongoDB...")
-    setup_mongodb()
-    LOGGER.info("MongoDB setup completed.")
+    # Setup database based on provider
+    match DATABASE_PROVIDER:
+        case "mongodb":
+            LOGGER.info("Setting up MongoDB...")
+            setup_mongodb()
+            LOGGER.info("MongoDB setup completed.")
+        case "postgres":
+            LOGGER.info("Setting up PostgreSQL...")
+            setup_postgres()
+            LOGGER.info("PostgreSQL setup completed.")
+        case _:
+            LOGGER.error(f"Unsupported database provider: {DATABASE_PROVIDER}")
+            raise ValueError(f"Unsupported database provider: {DATABASE_PROVIDER}")
 
     LOGGER.info("Setup completed successfully. Feel free to start the server now!")
 

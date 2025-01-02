@@ -11,7 +11,8 @@ class Settings(BaseSettings):
 
     # Required environment variables (referenced in config.toml)
     JWT_SECRET_KEY: str = Field(..., env="JWT_SECRET_KEY")
-    MONGODB_URI: str = Field(..., env="MONGODB_URI")
+    MONGODB_URI: Optional[str] = Field(None, env="MONGODB_URI")
+    POSTGRES_URI: Optional[str] = Field(None, env="POSTGRES_URI")
 
     UNSTRUCTURED_API_KEY: Optional[str] = Field(None, env="UNSTRUCTURED_API_KEY")
     AWS_ACCESS_KEY: Optional[str] = Field(None, env="AWS_ACCESS_KEY")
@@ -41,6 +42,8 @@ class Settings(BaseSettings):
 
     # Database settings
     DATABRIDGE_DB: str = "DataBridgeTest"
+    DOCUMENTS_TABLE: str = "documents"
+    CHUNKS_TABLE: str = "document_chunks"
     DOCUMENTS_COLLECTION: str = "documents"
     CHUNKS_COLLECTION: str = "document_chunks"
 
@@ -100,9 +103,21 @@ def get_settings() -> Settings:
         "AWS_REGION": config["storage"]["aws"]["region"],
         "S3_BUCKET": config["storage"]["aws"]["bucket_name"],
         # Database settings
-        "DATABRIDGE_DB": config["database"]["mongodb"]["database_name"],
-        "DOCUMENTS_COLLECTION": config["database"]["mongodb"]["documents_collection"],
-        "CHUNKS_COLLECTION": config["database"]["mongodb"]["chunks_collection"],
+        "DATABRIDGE_DB": config["database"][config["service"]["components"]["database"]][
+            "database_name"
+        ],
+        "DOCUMENTS_TABLE": config["database"]
+        .get("postgres", {})
+        .get("documents_table", "documents"),
+        "CHUNKS_TABLE": config["database"]
+        .get("postgres", {})
+        .get("chunks_table", "document_chunks"),
+        "DOCUMENTS_COLLECTION": config["database"]
+        .get("mongodb", {})
+        .get("documents_collection", "documents"),
+        "CHUNKS_COLLECTION": config["database"]
+        .get("mongodb", {})
+        .get("chunks_collection", "document_chunks"),
         # Vector store settings
         "VECTOR_INDEX_NAME": config["vector_store"]["mongodb"]["index_name"],
         "VECTOR_DIMENSIONS": config["vector_store"]["mongodb"]["dimensions"],

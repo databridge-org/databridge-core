@@ -6,7 +6,7 @@ reload = false
 
 [service.components]
 storage = "local" # "aws-s3"
-database = "mongodb"
+database = "postgres" # "postgres", "mongodb"
 vector_store = "mongodb"
 embedding = "ollama" # "openai", "ollama"
 completion = "ollama" # "openai", "ollama"
@@ -22,6 +22,11 @@ region = "us-east-2"
 bucket_name = "databridge-s3-storage"
 
 # Database Configuration
+[database.postgres]
+database_name = "databridge"
+documents_table = "documents"
+chunks_table = "document_chunks"
+
 [database.mongodb]
 database_name = "databridge"
 documents_collection = "documents"
@@ -39,7 +44,7 @@ similarity_metric = "cosine"
 model_name = "nomic-embed-text" # "text-embedding-3-small", "nomic-embed-text"
 
 [models.completion]
-model_name = "llama3.1" # "gpt-4o-mini", "llama3.1", etc.
+model_name = "llama3.2" # "gpt-4o-mini", "llama3.1", etc.
 default_max_tokens = 1000
 default_temperature = 0.7
 

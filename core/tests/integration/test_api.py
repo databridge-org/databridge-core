@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from core.api import app, get_settings
 import mimetypes
 import logging
+from sqlalchemy.ext.asyncio import create_async_engine
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,28 @@ logger = logging.getLogger(__name__)
 TEST_DATA_DIR = Path(__file__).parent / "test_data"
 JWT_SECRET = "your-secret-key-for-signing-tokens"
 TEST_USER_ID = "test_user"
+TEST_POSTGRES_URI = "postgresql+asyncpg://postgres:postgres@localhost:5432/databridge_test"
+
+
+async def setup_test_postgres():
+    """Setup test PostgreSQL database"""
+    engine = create_async_engine(TEST_POSTGRES_URI)
+    try:
+        async with engine.begin() as conn:
+            # Drop all tables first
+            from core.database.postgres_database import Base
+
+            await conn.run_sync(Base.metadata.drop_all)
+
+            # Create all tables
+            await conn.run_sync(Base.metadata.create_all)
+
+            logger.info("Test PostgreSQL database setup completed")
+    except Exception as e:
+        logger.error(f"Failed to setup test PostgreSQL database: {e}")
+        raise
+    finally:
+        await engine.dispose()
 
 
 @pytest.fixture(scope="session")
@@ -31,7 +54,7 @@ def event_loop():
 
 
 @pytest.fixture(scope="session", autouse=True)
-def setup_test_environment(event_loop):
+async def setup_test_environment(event_loop):
     """Setup test environment and create test files"""
     # Create test data directory if it doesn't exist
     TEST_DATA_DIR.mkdir(exist_ok=True)
@@ -45,6 +68,10 @@ def setup_test_environment(event_loop):
     pdf_file = TEST_DATA_DIR / "test.pdf"
     if not pdf_file.exists():
         pytest.skip("PDF file not available, skipping PDF tests")
+
+    # Setup test PostgreSQL database
+    if get_settings().DATABASE_PROVIDER == "postgres":
+        await setup_test_postgres()
 
 
 def create_test_token(
@@ -201,7 +228,6 @@ async def test_ingest_invalid_metadata(client: AsyncClient):
 async def test_ingest_oversized_content(client: AsyncClient):
     """Test ingestion with oversized content"""
     headers = create_auth_header()
-
     large_content = "x" * (10 * 1024 * 1024)  # 10MB
     response = await client.post(
         "/ingest/text", json={"content": large_content, "metadata": {}}, headers=headers
@@ -407,6 +433,13 @@ async def test_invalid_completion_params(client: AsyncClient):
         headers=headers,
     )
     assert response.status_code == 422
+
+
+@pytest.fixture(autouse=True)
+async def cleanup_database():
+    """Clean up database before each test"""
+    if get_settings().DATABASE_PROVIDER == "postgres":
+        await setup_test_postgres()
 
 
 @pytest.mark.asyncio
