@@ -1,5 +1,7 @@
 import json
 from datetime import datetime, UTC, timedelta
+from pathlib import Path
+import sys
 from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, Form, HTTPException, Depends, Header, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -30,6 +32,7 @@ from core.embedding.openai_embedding_model import OpenAIEmbeddingModel
 from core.completion.ollama_completion import OllamaCompletionModel
 from core.parser.contextual_parser import ContextualParser
 from core.reranker.flag_reranker import FlagReranker
+from core.cache.llama_cache_factory import LlamaCacheFactory
 import tomli
 
 # Initialize FastAPI app
@@ -214,6 +217,9 @@ if settings.USE_RERANKING:
         case _:
             raise ValueError(f"Unsupported reranker provider: {settings.RERANKER_PROVIDER}")
 
+# Initialize cache factory
+cache_factory = LlamaCacheFactory(Path(settings.STORAGE_PATH))
+
 # Initialize document service with configured components
 document_service = DocumentService(
     storage=storage,
@@ -223,6 +229,7 @@ document_service = DocumentService(
     completion_model=completion_model,
     parser=parser,
     reranker=reranker,
+    cache_factory=cache_factory,
 )
 
 
@@ -460,6 +467,134 @@ async def get_recent_usage(
             }
             for record in records
         ]
+
+
+# Cache endpoints
+@app.post("/cache/create")
+async def create_cache(
+    name: str,
+    model: str,
+    gguf_file: str,
+    filters: Optional[Dict[str, Any]] = None,
+    docs: Optional[List[str]] = None,
+    auth: AuthContext = Depends(verify_token),
+) -> Dict[str, Any]:
+    """Create a new cache with specified configuration."""
+    try:
+        async with telemetry.track_operation(
+            operation_type="create_cache",
+            user_id=auth.entity_id,
+            metadata={
+                "name": name,
+                "model": model,
+                "gguf_file": gguf_file,
+                "filters": filters,
+                "docs": docs,
+            },
+        ):
+            filter_docs = set(await document_service.db.get_documents(auth, filters=filters))
+            additional_docs = (
+                {
+                    await document_service.db.get_document(document_id=doc_id, auth=auth)
+                    for doc_id in docs
+                }
+                if docs
+                else set()
+            )
+            docs_to_add = list(filter_docs.union(additional_docs))
+            if not docs_to_add:
+                raise HTTPException(status_code=400, detail="No documents to add to cache")
+            response = await document_service.create_cache(
+                name, model, gguf_file, docs_to_add, filters
+            )
+            return response
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+
+@app.get("/cache/{name}")
+async def get_cache(name: str, auth: AuthContext = Depends(verify_token)) -> Dict[str, Any]:
+    """Get cache configuration by name."""
+    try:
+        async with telemetry.track_operation(
+            operation_type="get_cache",
+            user_id=auth.entity_id,
+            metadata={"name": name},
+        ):
+            exists = await document_service.load_cache(name)
+            return {"exists": exists}
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+
+@app.post("/cache/{name}/update")
+async def update_cache(name: str, auth: AuthContext = Depends(verify_token)) -> Dict[str, bool]:
+    """Update cache with new documents matching its filter."""
+    try:
+        async with telemetry.track_operation(
+            operation_type="update_cache",
+            user_id=auth.entity_id,
+            metadata={"name": name},
+        ):
+            if name not in document_service.active_caches:
+                exists = await document_service.load_cache(name)
+                if not exists:
+                    raise HTTPException(status_code=404, detail=f"Cache '{name}' not found")
+            cache = document_service.active_caches[name]
+            docs = await document_service.db.get_documents(auth, filters=cache.filters)
+            docs_to_add = [doc for doc in docs if doc.id not in cache.docs]
+            return cache.add_docs(docs_to_add)
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+
+@app.post("/cache/{name}/add_docs")
+async def add_docs_to_cache(
+    name: str, docs: List[str], auth: AuthContext = Depends(verify_token)
+) -> Dict[str, bool]:
+    """Add specific documents to the cache."""
+    try:
+        async with telemetry.track_operation(
+            operation_type="add_docs_to_cache",
+            user_id=auth.entity_id,
+            metadata={"name": name, "docs": docs},
+        ):
+            cache = document_service.active_caches[name]
+            docs_to_add = [
+                await document_service.db.get_document(doc_id, auth)
+                for doc_id in docs
+                if doc_id not in cache.docs
+            ]
+            return cache.add_docs(docs_to_add)
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+
+@app.post("/cache/{name}/query")
+async def query_cache(
+    name: str,
+    query: str,
+    max_tokens: Optional[int] = None,
+    temperature: Optional[float] = None,
+    auth: AuthContext = Depends(verify_token),
+) -> CompletionResponse:
+    """Query the cache with a prompt."""
+    try:
+        async with telemetry.track_operation(
+            operation_type="query_cache",
+            user_id=auth.entity_id,
+            metadata={
+                "name": name,
+                "query": query,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            },
+        ):
+            cache = document_service.active_caches[name]
+            print(f"Cache state: {cache.state.n_tokens}", file=sys.stderr)
+            return cache.query(query)  # , max_tokens, temperature)
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
 
 
 @app.post("/local/generate_uri", include_in_schema=True)

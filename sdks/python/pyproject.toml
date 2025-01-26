@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "databridge-client"
-version = "0.1.8"
+version = "0.2.0"
 authors = [
     { name = "DataBridge", email = "databridgesuperuser@gmail.com" },
 ]

@@ -21,6 +21,8 @@ from core.completion.base_completion import CompletionRequest, CompletionRespons
 import logging
 from core.reranker.base_reranker import BaseReranker
 from core.config import get_settings
+from core.cache.base_cache import BaseCache
+from core.cache.base_cache_factory import BaseCacheFactory
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,7 @@ class DocumentService:
         parser: BaseParser,
         embedding_model: BaseEmbeddingModel,
         completion_model: BaseCompletionModel,
+        cache_factory: BaseCacheFactory,
         reranker: Optional[BaseReranker] = None,
     ):
         self.db = database
@@ -43,6 +46,11 @@ class DocumentService:
         self.embedding_model = embedding_model
         self.completion_model = completion_model
         self.reranker = reranker
+        self.cache_factory = cache_factory
+
+        # Cache-related data structures
+        # Maps cache name to active cache object
+        self.active_caches: Dict[str, BaseCache] = {}
 
     async def retrieve_chunks(
         self,
@@ -151,6 +159,7 @@ class DocumentService:
             },
         )
         logger.info(f"Created text document record with ID {doc.external_id}")
+        doc.system_metadata["content"] = request.content
 
         # 2. Parse content into chunks
         chunks = await self.parser.split_text(request.content)
@@ -196,6 +205,7 @@ class DocumentService:
             },
             additional_metadata=additional_metadata,
         )
+        doc.system_metadata["content"] = "\n".join(chunk.content for chunk in chunks)
         logger.info(f"Created file document record with ID {doc.external_id}")
 
         storage_info = await self.storage.upload_from_base64(
@@ -333,3 +343,90 @@ class DocumentService:
 
         logger.info(f"Created {len(results)} document results")
         return results
+
+    async def create_cache(
+        self,
+        name: str,
+        model: str,
+        gguf_file: str,
+        docs: List[Document | None],
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, str]:
+        """Create a new cache with specified configuration.
+
+        Args:
+            name: Name of the cache to create
+            model: Name of the model to use
+            gguf_file: Name of the GGUF file to use
+            filters: Optional metadata filters for documents to include
+            docs: Optional list of specific document IDs to include
+        """
+        # Create cache metadata
+        metadata = {
+            "model": model,
+            "model_file": gguf_file,
+            "filters": filters,
+            "docs": [doc.model_dump_json() for doc in docs],
+            "storage_info": {
+                "bucket": "caches",
+                "key": f"{name}_state.pkl",
+            },
+        }
+
+        # Store metadata in database
+        success = await self.db.store_cache_metadata(name, metadata)
+        if not success:
+            logger.error(f"Failed to store cache metadata for cache {name}")
+            return {"success": False, "message": f"Failed to store cache metadata for cache {name}"}
+
+        # Create cache instance
+        cache = self.cache_factory.create_new_cache(
+            name=name, model=model, model_file=gguf_file, filters=filters, docs=docs
+        )
+        cache_bytes = cache.saveable_state
+        base64_cache_bytes = base64.b64encode(cache_bytes).decode()
+        bucket, key = await self.storage.upload_from_base64(
+            base64_cache_bytes,
+            key=metadata["storage_info"]["key"],
+            bucket=metadata["storage_info"]["bucket"],
+        )
+        return {
+            "success": True,
+            "message": f"Cache created successfully, state stored in bucket `{bucket}` with key `{key}`",
+        }
+
+    async def load_cache(self, name: str) -> bool:
+        """Load a cache into memory.
+
+        Args:
+            name: Name of the cache to load
+
+        Returns:
+            bool: Whether the cache exists and was loaded successfully
+        """
+        try:
+            # Get cache metadata from database
+            metadata = await self.db.get_cache_metadata(name)
+            if not metadata:
+                logger.error(f"No metadata found for cache {name}")
+                return False
+
+            # Get cache bytes from storage
+            cache_bytes = await self.storage.download_file(
+                metadata["storage_info"]["bucket"], "caches/" + metadata["storage_info"]["key"]
+            )
+            cache_bytes = cache_bytes.read()
+            cache = self.cache_factory.load_cache_from_bytes(
+                name=name, cache_bytes=cache_bytes, metadata=metadata
+            )
+            self.active_caches[name] = cache
+            return {"success": True, "message": "Cache loaded successfully"}
+        except Exception as e:
+            logger.error(f"Failed to load cache {name}: {e}")
+            # raise e
+            return {"success": False, "message": f"Failed to load cache {name}: {e}"}
+
+    def close(self):
+        """Close all resources."""
+        # Close any active caches
+        self.active_caches.clear()

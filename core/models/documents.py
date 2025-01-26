@@ -40,6 +40,14 @@ class Document(BaseModel):
     )
     chunk_ids: List[str] = Field(default_factory=list)
 
+    def __hash__(self):
+        return hash(self.external_id)
+
+    def __eq__(self, other):
+        if not isinstance(other, Document):
+            return False
+        return self.external_id == other.external_id
+
 
 class DocumentContent(BaseModel):
     """Represents either a URL or content string"""

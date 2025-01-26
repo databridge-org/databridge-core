@@ -26,6 +26,7 @@ class MongoDatabase(BaseDatabase):
         self.client = AsyncIOMotorClient(uri)
         self.db = self.client[db_name]
         self.collection = self.db[collection_name]
+        self.caches = self.db["caches"]  # Collection for cache metadata
 
     async def initialize(self):
         """Initialize database indexes."""
@@ -217,3 +218,45 @@ class MongoDatabase(BaseDatabase):
         for key, value in filters.items():
             filter_dict[f"metadata.{key}"] = value
         return filter_dict
+
+    async def store_cache_metadata(self, name: str, metadata: Dict[str, Any]) -> bool:
+        """Store metadata for a cache in MongoDB.
+
+        Args:
+            name: Name of the cache
+            metadata: Cache metadata including model info and storage location
+
+        Returns:
+            bool: Whether the operation was successful
+        """
+        try:
+            # Add timestamp and ensure name is included
+            doc = {
+                "name": name,
+                "metadata": metadata,
+                "created_at": datetime.now(UTC),
+                "updated_at": datetime.now(UTC),
+            }
+
+            # Upsert the document
+            result = await self.caches.update_one({"name": name}, {"$set": doc}, upsert=True)
+            return bool(result.modified_count or result.upserted_id)
+        except Exception as e:
+            logger.error(f"Failed to store cache metadata: {e}")
+            return False
+
+    async def get_cache_metadata(self, name: str) -> Optional[Dict[str, Any]]:
+        """Get metadata for a cache from MongoDB.
+
+        Args:
+            name: Name of the cache
+
+        Returns:
+            Optional[Dict[str, Any]]: Cache metadata if found, None otherwise
+        """
+        try:
+            doc = await self.caches.find_one({"name": name})
+            return doc["metadata"] if doc else None
+        except Exception as e:
+            logger.error(f"Failed to get cache metadata: {e}")
+            return None

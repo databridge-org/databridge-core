@@ -1,3 +1,4 @@
+import json
 from typing import List, Optional, Dict, Any
 from datetime import datetime, UTC
 import logging
@@ -65,8 +66,24 @@ class PostgresDatabase(BaseDatabase):
         try:
             async with self.engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
+
+                # Create caches table if it doesn't exist
+                await conn.execute(
+                    text(
+                        """
+                    CREATE TABLE IF NOT EXISTS caches (
+                        name TEXT PRIMARY KEY,
+                        metadata JSONB NOT NULL,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                    )
+                """
+                    )
+                )
+
             logger.info("PostgreSQL tables and indexes created successfully")
             return True
+
         except Exception as e:
             logger.error(f"Error creating PostgreSQL tables and indexes: {str(e)}")
             return False
@@ -324,3 +341,54 @@ class PostgresDatabase(BaseDatabase):
             filter_conditions.append(f"doc_metadata->>'{key}' = '{value}'")
 
         return " AND ".join(filter_conditions)
+
+    async def store_cache_metadata(self, name: str, metadata: Dict[str, Any]) -> bool:
+        """Store metadata for a cache in PostgreSQL.
+
+        Args:
+            name: Name of the cache
+            metadata: Cache metadata including model info and storage location
+
+        Returns:
+            bool: Whether the operation was successful
+        """
+        try:
+            async with self.async_session() as session:
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO caches (name, metadata, updated_at)
+                        VALUES (:name, :metadata, CURRENT_TIMESTAMP)
+                        ON CONFLICT (name)
+                        DO UPDATE SET
+                            metadata = :metadata,
+                            updated_at = CURRENT_TIMESTAMP
+                        """
+                    ),
+                    {"name": name, "metadata": json.dumps(metadata)},
+                )
+                await session.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Failed to store cache metadata: {e}")
+            return False
+
+    async def get_cache_metadata(self, name: str) -> Optional[Dict[str, Any]]:
+        """Get metadata for a cache from PostgreSQL.
+
+        Args:
+            name: Name of the cache
+
+        Returns:
+            Optional[Dict[str, Any]]: Cache metadata if found, None otherwise
+        """
+        try:
+            async with self.async_session() as session:
+                result = await session.execute(
+                    text("SELECT metadata FROM caches WHERE name = :name"), {"name": name}
+                )
+                row = result.first()
+                return row[0] if row else None
+        except Exception as e:
+            logger.error(f"Failed to get cache metadata: {e}")
+            return None

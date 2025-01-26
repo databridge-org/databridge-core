@@ -37,6 +37,8 @@ def sample_chunks() -> List[DocumentChunk]:
 def reranker():
     """Fixture to create and reuse a flag reranker instance"""
     settings = get_settings()
+    if not settings.USE_RERANKING:
+        pytest.skip("Reranker is disabled in settings")
     return FlagReranker(
         model_name=settings.RERANKER_MODEL,
         device=settings.RERANKER_DEVICE,
@@ -49,6 +51,8 @@ def reranker():
 @pytest.mark.asyncio
 async def test_reranker_relevance(reranker, sample_chunks):
     """Test that reranker improves relevance for programming-related query"""
+    if not get_settings().USE_RERANKING:
+        pytest.skip("Reranker is disabled in settings")
     print("\n=== Testing Reranker Relevance ===")
     query = "What is Python programming language?"
 
@@ -70,6 +74,8 @@ async def test_reranker_relevance(reranker, sample_chunks):
 @pytest.mark.asyncio
 async def test_reranker_score_distribution(reranker, sample_chunks):
     """Test that reranker produces reasonable score distribution"""
+    if not get_settings().USE_RERANKING:
+        pytest.skip("Reranker is disabled in settings")
     print("\n=== Testing Score Distribution ===")
     query = "Tell me about machine learning and data science"
 
@@ -95,6 +101,8 @@ async def test_reranker_score_distribution(reranker, sample_chunks):
 @pytest.mark.asyncio
 async def test_reranker_batch_scoring(reranker):
     """Test that reranker can handle multiple queries/passages efficiently"""
+    if not get_settings().USE_RERANKING:
+        pytest.skip("Reranker is disabled in settings")
     print("\n=== Testing Batch Scoring ===")
     texts = [
         "Python is a programming language",
@@ -118,6 +126,8 @@ async def test_reranker_batch_scoring(reranker):
 @pytest.mark.asyncio
 async def test_reranker_empty_and_edge_cases(reranker, sample_chunks):
     """Test reranker behavior with empty or edge case inputs"""
+    if not get_settings().USE_RERANKING:
+        pytest.skip("Reranker is disabled in settings")
     print("\n=== Testing Edge Cases ===")
 
     # Empty chunks list
@@ -147,6 +157,8 @@ async def test_reranker_empty_and_edge_cases(reranker, sample_chunks):
 @pytest.mark.asyncio
 async def test_reranker_consistency(reranker, sample_chunks):
     """Test that reranker produces consistent results for same input"""
+    if not get_settings().USE_RERANKING:
+        pytest.skip("Reranker is disabled in settings")
     print("\n=== Testing Consistency ===")
     query = "What is Python programming?"
 

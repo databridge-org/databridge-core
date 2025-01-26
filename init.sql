@@ -31,7 +31,15 @@ CREATE TABLE IF NOT EXISTS vector_embeddings (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Create caches table
+CREATE TABLE IF NOT EXISTS caches (
+    name TEXT PRIMARY KEY,
+    metadata JSON NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Create vector index
-CREATE INDEX IF NOT EXISTS vector_idx 
+CREATE INDEX IF NOT EXISTS vector_idx
 ON vector_embeddings USING ivfflat (embedding vector_l2_ops)
-WITH (lists = 100); 
+WITH (lists = 100);

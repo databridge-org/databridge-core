@@ -241,11 +241,22 @@ def setup_postgres():
 
                 # Import and create all tables
                 from core.database.postgres_database import Base
-                from core.vector_store.pgvector_store import Base as VectorBase
 
                 # Create regular tables first
                 await conn.run_sync(Base.metadata.create_all)
                 LOGGER.info("Created base PostgreSQL tables")
+
+                # Create caches table
+                create_caches_table = """
+                CREATE TABLE IF NOT EXISTS caches (
+                    name TEXT PRIMARY KEY,
+                    metadata JSON NOT NULL,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+                await conn.execute(text(create_caches_table))
+                LOGGER.info("Created caches table")
 
                 # Get vector dimensions from config
                 dimensions = CONFIG["embedding"]["dimensions"]
@@ -278,8 +289,8 @@ def setup_postgres():
                 LOGGER.info("Created vector_embeddings table with vector column")
 
                 # Create the vector index
-                index_sql = f"""
-                CREATE INDEX vector_idx 
+                index_sql = """
+                CREATE INDEX vector_idx
                 ON vector_embeddings USING ivfflat (embedding vector_l2_ops)
                 WITH (lists = 100);
                 """

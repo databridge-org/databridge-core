@@ -72,3 +72,28 @@ class BaseDatabase(ABC):
         Returns: True if user has required access, False otherwise
         """
         pass
+
+    @abstractmethod
+    async def store_cache_metadata(self, name: str, metadata: Dict[str, Any]) -> bool:
+        """Store metadata for a cache.
+
+        Args:
+            name: Name of the cache
+            metadata: Cache metadata including model info and storage location
+
+        Returns:
+            bool: Whether the operation was successful
+        """
+        pass
+
+    @abstractmethod
+    async def get_cache_metadata(self, name: str) -> Optional[Dict[str, Any]]:
+        """Get metadata for a cache.
+
+        Args:
+            name: Name of the cache
+
+        Returns:
+            Optional[Dict[str, Any]]: Cache metadata if found, None otherwise
+        """
+        pass

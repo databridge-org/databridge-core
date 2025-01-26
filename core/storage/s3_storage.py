@@ -37,6 +37,7 @@ class S3Storage(BaseStorage):
         file: Union[str, bytes, BinaryIO],
         key: str,
         content_type: Optional[str] = None,
+        bucket: str = "",
     ) -> Tuple[str, str]:
         """Upload a file to S3."""
         try:
@@ -70,15 +71,18 @@ class S3Storage(BaseStorage):
             raise
 
     async def upload_from_base64(
-        self, content: str, key: str, content_type: Optional[str] = None
+        self, content: str, key: str, content_type: Optional[str] = None, bucket: str = ""
     ) -> Tuple[str, str]:
         """Upload base64 encoded content to S3."""
+        key = f"{bucket}/{key}" if bucket else key
         try:
             decoded_content = base64.b64decode(content)
             extension = detect_file_type(content)
             key = f"{key}{extension}"
 
-            return await self.upload_file(file=decoded_content, key=key, content_type=content_type)
+            return await self.upload_file(
+                file=decoded_content, key=key, content_type=content_type, bucket=bucket
+            )
 
         except Exception as e:
             logger.error(f"Error uploading base64 content to S3: {e}")

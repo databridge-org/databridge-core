@@ -7,7 +7,7 @@ class BaseStorage(ABC):
 
     @abstractmethod
     async def upload_from_base64(
-        self, content: str, key: str, content_type: Optional[str] = None
+        self, content: str, key: str, content_type: Optional[str] = None, bucket: str = ""
     ) -> Tuple[str, str]:
         """
         Upload base64 encoded content.
@@ -16,7 +16,7 @@ class BaseStorage(ABC):
             content: Base64 encoded content
             key: Storage key/path
             content_type: Optional MIME type
-
+            bucket: Optional bucket/folder name
         Returns:
             Tuple[str, str]: (bucket/container name, storage key)
         """
