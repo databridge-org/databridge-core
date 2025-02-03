@@ -21,13 +21,6 @@ class Document(BaseModel):
     chunk_ids: List[str] = Field(default_factory=list, description="IDs of document chunks")
 
 
-class IngestTextRequest(BaseModel):
-    """Request model for text ingestion"""
-
-    content: str = Field(..., description="Text content to ingest")
-    metadata: Dict[str, Any] = Field(default_factory=dict, description="Optional metadata")
-
-
 class ChunkResult(BaseModel):
     """Query result at chunk level"""
 

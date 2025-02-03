@@ -11,7 +11,6 @@ from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from core.completion.openai_completion import OpenAICompletionModel
 from core.embedding.ollama_embedding_model import OllamaEmbeddingModel
 from core.models.request import (
-    IngestTextRequest,
     RetrieveRequest,
     CompletionQueryRequest,
 )
@@ -272,30 +271,44 @@ async def verify_token(authorization: str = Header(None)) -> AuthContext:
 
 @app.post("/ingest/text", response_model=Document)
 async def ingest_text(
-    request: IngestTextRequest, auth: AuthContext = Depends(verify_token)
+    content: str = Form(...),
+    metadata: str = Form("{}"),
+    rules: str = Form("[]"),
+    auth: AuthContext = Depends(verify_token),
 ) -> Document:
     """Ingest a text document."""
     try:
+        metadata_dict = json.loads(metadata)
+        rules_list = json.loads(rules)
         async with telemetry.track_operation(
             operation_type="ingest_text",
             user_id=auth.entity_id,
-            tokens_used=len(request.content.split()),  # Approximate token count
-            metadata=request.metadata if request.metadata else None,
+            tokens_used=len(content.split()),  # Approximate token count
+            metadata={
+                "metadata": metadata_dict,
+                "rules": rules_list,
+            },
         ):
-            return await document_service.ingest_text(request, auth)
+            return await document_service.ingest_text(
+                content=content, metadata=metadata_dict, auth=auth, rules=rules_list
+            )
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
+    except json.JSONDecodeError:
+        raise HTTPException(400, "Invalid metadata or rules JSON")
 
 
 @app.post("/ingest/file", response_model=Document)
 async def ingest_file(
     file: UploadFile,
     metadata: str = Form("{}"),
+    rules: str = Form("[]"),
     auth: AuthContext = Depends(verify_token),
 ) -> Document:
     """Ingest a file document."""
     try:
         metadata_dict = json.loads(metadata)
+        rules_list = json.loads(rules)
         async with telemetry.track_operation(
             operation_type="ingest_file",
             user_id=auth.entity_id,
@@ -303,14 +316,15 @@ async def ingest_file(
                 "filename": file.filename,
                 "content_type": file.content_type,
                 "metadata": metadata_dict,
+                "rules": rules_list,
             },
         ):
-            doc = await document_service.ingest_file(file, metadata_dict, auth)
+            doc = await document_service.ingest_file(file, metadata_dict, auth, rules=rules_list)
             return doc
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
     except json.JSONDecodeError:
-        raise HTTPException(400, "Invalid metadata JSON")
+        raise HTTPException(400, "Invalid metadata or rules JSON")
 
 
 @app.post("/retrieve/chunks", response_model=List[ChunkResult])

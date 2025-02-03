@@ -2,13 +2,6 @@ from typing import Dict, Any, Optional
 from pydantic import BaseModel, Field
 
 
-class IngestTextRequest(BaseModel):
-    """Request model for text ingestion"""
-
-    content: str
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-
-
 class RetrieveRequest(BaseModel):
     """Base retrieve request model"""
 

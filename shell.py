@@ -21,6 +21,7 @@ This provides the exact same interface as the Python SDK:
 import sys
 from pathlib import Path
 import time
+from typing import Any, Dict, List, Optional
 import requests
 
 # Add local SDK to path before other imports
@@ -57,18 +58,49 @@ class DB:
 
         return False
 
-    def ingest_text(self, content: str, metadata: dict = None) -> dict:
-        """Ingest text content into DataBridge"""
-        doc = self._client.ingest_text(content, metadata=metadata or {})
+    def ingest_text(
+        self,
+        content: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        rules: Optional[List[str]] = None,
+    ) -> dict:
+        """
+        Ingest text content into DataBridge.
+
+        Args:
+            content: Text content to ingest
+            metadata: Optional metadata dictionary
+            rules: Optional list of rules to apply during ingestion (e.g., ["Extract name", "Redact PII"])
+        """
+        doc = self._client.ingest_text(content, metadata=metadata or {}, rules=rules)
         return doc.model_dump()
 
     def ingest_file(
-        self, file: str, filename: str, metadata: dict = None, content_type: str = None
+        self,
+        file: str,
+        filename: str = None,
+        metadata: dict = None,
+        content_type: str = None,
+        rules: list = None,
     ) -> dict:
-        """Ingest a file into DataBridge"""
+        """
+        Ingest a file into DataBridge.
+
+        Args:
+            file: Path to file to ingest
+            filename: Optional filename (defaults to basename of file path)
+            metadata: Optional metadata dictionary
+            content_type: Optional MIME type
+            rules: Optional list of rules to apply during ingestion (e.g., ["Extract dates", "Redact personal info"])
+        """
         file_path = Path(file)
+        filename = filename or file_path.name
         doc = self._client.ingest_file(
-            file=file_path, filename=filename, content_type=content_type, metadata=metadata or {}
+            file=file_path,
+            filename=filename,
+            content_type=content_type,
+            metadata=metadata or {},
+            rules=rules,
         )
         return doc.model_dump()
 

@@ -9,7 +9,6 @@ import requests
 
 from .models import (
     Document,
-    IngestTextRequest,
     ChunkResult,
     DocumentResult,
     CompletionResponse,
@@ -103,29 +102,44 @@ class DataBridge:
         if self._auth_token:  # Only add auth header if we have a token
             headers["Authorization"] = f"Bearer {self._auth_token}"
 
-        if not files:
+        # Configure request data based on type
+        if files:
+            # Multipart form data for files
+            request_data = {"files": files, "data": data}
+            # Don't set Content-Type, let requests handle it
+        elif data and endpoint == "ingest/text":
+            # x-www-form-urlencoded for ingest_text
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
+            request_data = {"data": data}
+        else:
+            # JSON for everything else
             headers["Content-Type"] = "application/json"
+            request_data = {"json": data}
 
         response = self._session.request(
             method,
             f"{self._base_url}/{endpoint.lstrip('/')}",
-            json=data if not files else None,
-            files=files,
-            data=data if files else None,
             headers=headers,
             timeout=self._timeout,
             params=params,
+            **request_data,
         )
         response.raise_for_status()
         return response.json()
 
-    def ingest_text(self, content: str, metadata: Optional[Dict[str, Any]] = None) -> Document:
+    def ingest_text(
+        self,
+        content: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        rules: Optional[List[str]] = None,
+    ) -> Document:
         """
         Ingest a text document into DataBridge.
 
         Args:
             content: Text content to ingest
             metadata: Optional metadata dictionary
+            rules: Optional list of rules to apply during ingestion (e.g., ["Extract name and store in metadata.name", "Redact PII"])
 
         Returns:
             Document: Metadata of the ingested document
@@ -137,13 +151,20 @@ class DataBridge:
                 metadata={
                     "title": "ML Introduction",
                     "category": "tech"
-                }
+                },
+                rules=[
+                    "Extract key terms into metadata.terms",
+                    "Redact any email addresses"
+                ]
             )
             ```
         """
-        request = IngestTextRequest(content=content, metadata=metadata or {})
-
-        response = self._request("POST", "ingest/text", request.model_dump())
+        form_data = {
+            "content": content,
+            "metadata": json.dumps(metadata or {}),
+            "rules": json.dumps(rules or []),
+        }
+        response = self._request("POST", "ingest/text", data=form_data)
         return Document(**response)
 
     def ingest_file(
@@ -152,6 +173,7 @@ class DataBridge:
         filename: str,
         content_type: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        rules: Optional[List[str]] = None,
     ) -> Document:
         """
         Ingest a file document into DataBridge.
@@ -161,6 +183,7 @@ class DataBridge:
             filename: Name of the file
             content_type: MIME type (optional, will be guessed if not provided)
             metadata: Optional metadata dictionary
+            rules: Optional list of rules to apply during ingestion (e.g., ["Extract dates", "Redact personal info"])
 
         Returns:
             Document: Metadata of the ingested document
@@ -172,7 +195,11 @@ class DataBridge:
                 "document.pdf",
                 filename="document.pdf",
                 content_type="application/pdf",
-                metadata={"department": "research"}
+                metadata={"department": "research"},
+                rules=[
+                    "Extract author names into metadata.authors",
+                    "Extract publication date into metadata.pub_date"
+                ]
             )
 
             # From file object
@@ -197,8 +224,8 @@ class DataBridge:
             # Prepare multipart form data
             files = {"file": (filename, file_obj, content_type or "application/octet-stream")}
 
-            # Add metadata
-            data = {"metadata": json.dumps(metadata or {})}
+            # Add metadata and rules
+            data = {"metadata": json.dumps(metadata or {}), "rules": json.dumps(rules or [])}
 
             response = self._request("POST", "ingest/file", data=data, files=files)
             return Document(**response)
