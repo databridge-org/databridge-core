@@ -7,7 +7,8 @@ from datetime import datetime, timedelta, UTC
 from typing import AsyncGenerator, Dict
 from httpx import AsyncClient
 from fastapi import FastAPI
-from core.api import app, get_settings
+from core.api import app
+from core.shared import settings
 import mimetypes
 import logging
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -70,7 +71,7 @@ async def setup_test_environment(event_loop):
         pytest.skip("PDF file not available, skipping PDF tests")
 
     # Setup test PostgreSQL database
-    if get_settings().DATABASE_PROVIDER == "postgres":
+    if settings.DATABASE_PROVIDER == "postgres":
         await setup_test_postgres()
 
 
@@ -110,7 +111,6 @@ def create_auth_header(
 async def test_app(event_loop: asyncio.AbstractEventLoop) -> FastAPI:
     """Create test FastAPI application"""
     # Configure test settings
-    settings = get_settings()
     settings.JWT_SECRET_KEY = JWT_SECRET
     return app
 
@@ -222,7 +222,7 @@ async def test_ingest_invalid_metadata(client: AsyncClient):
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(
-    get_settings().EMBEDDING_PROVIDER == "ollama",
+    settings.EMBEDDING_PROVIDER == "ollama",
     reason="local embedding models do not have size limits",
 )
 async def test_ingest_oversized_content(client: AsyncClient):
@@ -238,7 +238,7 @@ async def test_ingest_oversized_content(client: AsyncClient):
 @pytest.mark.asyncio
 async def test_auth_missing_header(client: AsyncClient):
     """Test authentication with missing auth header"""
-    if get_settings().dev_mode:
+    if settings.dev_mode:
         pytest.skip("Auth tests skipped in dev mode")
     response = await client.post("/ingest/text")
     assert response.status_code == 401
@@ -247,7 +247,7 @@ async def test_auth_missing_header(client: AsyncClient):
 @pytest.mark.asyncio
 async def test_auth_invalid_token(client: AsyncClient):
     """Test authentication with invalid token"""
-    if get_settings().dev_mode:
+    if settings.dev_mode:
         pytest.skip("Auth tests skipped in dev mode")
     headers = {"Authorization": "Bearer invalid_token"}
     response = await client.post("/ingest/file", headers=headers)
@@ -257,7 +257,7 @@ async def test_auth_invalid_token(client: AsyncClient):
 @pytest.mark.asyncio
 async def test_auth_expired_token(client: AsyncClient):
     """Test authentication with expired token"""
-    if get_settings().dev_mode:
+    if settings.dev_mode:
         pytest.skip("Auth tests skipped in dev mode")
     headers = create_auth_header(expired=True)
     response = await client.post("/ingest/text", headers=headers)
@@ -267,7 +267,7 @@ async def test_auth_expired_token(client: AsyncClient):
 @pytest.mark.asyncio
 async def test_auth_insufficient_permissions(client: AsyncClient):
     """Test authentication with insufficient permissions"""
-    if get_settings().dev_mode:
+    if settings.dev_mode:
         pytest.skip("Auth tests skipped in dev mode")
     headers = create_auth_header(permissions=["read"])
     response = await client.post(
@@ -343,7 +343,7 @@ async def test_retrieve_chunks(client: AsyncClient):
     assert response.status_code == 200
     results = list(response.json())
     assert len(results) > 0
-    assert (not get_settings().USE_RERANKING) or results[0]["score"] > 0.5
+    assert (not settings.USE_RERANKING) or results[0]["score"] > 0.5
     assert any(upload_string == result["content"] for result in results)
 
 
@@ -446,7 +446,7 @@ async def test_invalid_completion_params(client: AsyncClient):
 @pytest.fixture(autouse=True)
 async def cleanup_database():
     """Clean up database before each test"""
-    if get_settings().DATABASE_PROVIDER == "postgres":
+    if settings.DATABASE_PROVIDER == "postgres":
         await setup_test_postgres()
 
 
