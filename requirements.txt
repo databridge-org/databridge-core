@@ -260,7 +260,7 @@ typing-inspect==0.9.0
 typing_extensions==4.11.0
 tzdata==2024.1
 ujson==5.9.0
-ultralytics==8.3.55
+ultralytics==8.0.0
 ultralytics-thop==2.0.13
 unlzw3==0.2.3
 unstructured==0.15.0
