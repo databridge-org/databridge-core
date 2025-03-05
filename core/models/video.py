@@ -1,5 +1,5 @@
 from collections import defaultdict
-from typing import List, Tuple, Optional, Union, Dict
+from typing import List, Tuple, Optional, Union, Dict, Any
 from bisect import bisect_left
 import logging
 
@@ -101,3 +101,4 @@ class ParseVideoResult(BaseModel):
     metadata: Dict[str, Union[float, int]]
     frame_descriptions: TimeSeriesData
     transcript: TimeSeriesData
+    tracking_metadata: Optional[Dict[str, Any]] = None
