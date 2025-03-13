@@ -8,6 +8,7 @@ import tomli
 import os
 from typing import Optional, Dict, Any
 from ollama import AsyncClient
+from core.parser.video.track_video import track_video
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +66,12 @@ class VisionModelClient:
 
 class VideoParser:
     def __init__(
-        self, video_path: str, assemblyai_api_key: str, frame_sample_rate: Optional[int] = None
+        self,
+        video_path: str,
+        assemblyai_api_key: str,
+        frame_sample_rate: Optional[int] = None,
+        track_every_n_frames: Optional[int] = None,
+        tracking_confidence_threshold: float = 0.3,
     ):
         """
         Initialize the video parser
@@ -74,6 +80,8 @@ class VideoParser:
             video_path: Path to the video file
             assemblyai_api_key: API key for AssemblyAI
             frame_sample_rate: Sample every nth frame for description (optional, defaults to config value)
+            track_every_n_frames: Sample every nth frame for tracking (optional, defaults to 1)
+            tracking_confidence_threshold: Minimum confidence for object detections
         """
         logger.info(f"Initializing VideoParser for {video_path}")
         self.config = load_config()
@@ -81,8 +89,11 @@ class VideoParser:
         self.frame_sample_rate = frame_sample_rate or self.config["parser"]["vision"].get(
             "frame_sample_rate", 120
         )
-        self.cap = cv2.VideoCapture(video_path)
+        self.track_every_n_frames = track_every_n_frames or 1
+        self.tracking_confidence_threshold = tracking_confidence_threshold
 
+        # Initialize video capture for basic properties
+        self.cap = cv2.VideoCapture(video_path)
         if not self.cap.isOpened():
             logger.error(f"Failed to open video file: {video_path}")
             raise ValueError(f"Could not open video file: {video_path}")
@@ -90,6 +101,7 @@ class VideoParser:
         self.fps = self.cap.get(cv2.CAP_PROP_FPS)
         self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
         self.duration = self.total_frames / self.fps
+        self.cap.release()
 
         # Initialize AssemblyAI
         aai.settings.api_key = assemblyai_api_key
@@ -199,10 +211,10 @@ class VideoParser:
 
     async def process_video(self) -> ParseVideoResult:
         """
-        Process the video to get both transcript and frame descriptions
+        Process the video to get transcript, frame descriptions, and tracking data
 
         Returns:
-            Dictionary containing transcript and frame descriptions as TimeSeriesData objects
+            ParseVideoResult containing metadata, transcript, frame descriptions, and tracking data
         """
         logger.info("Starting full video processing")
         metadata = {
@@ -210,11 +222,27 @@ class VideoParser:
             "fps": self.fps,
             "total_frames": self.total_frames,
             "frame_sample_rate": self.frame_sample_rate,
+            "track_every_n_frames": self.track_every_n_frames,
         }
+
+        # Get transcript and frame descriptions
+        transcript = self.get_transcript()
+        frame_descriptions = await self.get_frame_descriptions()
+
+        # Get tracking data
+        logger.info("Starting object tracking")
+        tracking_metadata = await track_video(
+            video_path=self.video_path,
+            track_every_n_frames=self.track_every_n_frames,
+            confidence_threshold=self.tracking_confidence_threshold
+        )
+        logger.info("Object tracking completed")
+
         result = ParseVideoResult(
             metadata=metadata,
-            transcript=self.get_transcript(),
-            frame_descriptions=await self.get_frame_descriptions(),
+            transcript=transcript,
+            frame_descriptions=frame_descriptions,
+            tracking_metadata=tracking_metadata,
         )
         logger.info("Video processing completed successfully")
         return result

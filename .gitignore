@@ -27,6 +27,8 @@ core/tests/assets
 storage/*
 logs/*
 samples/*
+
+*.pt
 aggregated_code.txt
 
 offload/*
