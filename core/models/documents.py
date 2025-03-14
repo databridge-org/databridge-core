@@ -131,7 +131,7 @@ class ChunkResult(BaseModel):
             #         if content.startswith('data:'):
             #             # Extract the base64 part after the comma
             #             content = content.split(',', 1)[1]
-                    
+
             #         # Now decode the base64 string
             #         image_bytes = base64.b64decode(content)
             #         content = Image.open(io.BytesIO(image_bytes))

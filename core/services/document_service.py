@@ -13,6 +13,8 @@ from core.models.documents import (
     StorageFileInfo,
 )
 from ..models.auth import AuthContext
+from ..models.graph import Graph
+from core.services.graph_service import GraphService
 from core.database.base_database import BaseDatabase
 from core.storage.base_storage import BaseStorage
 from core.vector_store.base_vector_store import BaseVectorStore
@@ -65,6 +67,13 @@ class DocumentService:
         self.rules_processor = RulesProcessor()
         self.colpali_embedding_model = colpali_embedding_model
         self.colpali_vector_store = colpali_vector_store
+        
+        # Initialize the graph service
+        self.graph_service = GraphService(
+            db=database,
+            embedding_model=embedding_model,
+            completion_model=completion_model,
+        )
 
         if colpali_vector_store:
             colpali_vector_store.initialize()
@@ -108,7 +117,7 @@ class DocumentService:
             await self.colpali_vector_store.query_similar(
                 query_embedding_multivector, k=k, doc_ids=doc_ids
             )
-            if (use_colpali and self.colpali_vector_store and query_embedding_multivector)
+            if (use_colpali and self.colpali_vector_store and query_embedding_multivector is not None)
             else []
         )
 
@@ -235,14 +244,54 @@ class DocumentService:
         temperature: Optional[float] = None,
         use_reranking: Optional[bool] = None,
         use_colpali: Optional[bool] = None,
+        graph_name: Optional[str] = None,
+        hop_depth: int = 1,
+        include_paths: bool = False,
     ) -> CompletionResponse:
-        """Generate completion using relevant chunks as context."""
-        # Get relevant chunks
+        """Generate completion using relevant chunks as context.
+        
+        When graph_name is provided, the query will leverage the knowledge graph 
+        to enhance retrieval by finding relevant entities and their connected documents.
+        
+        Args:
+            query: The query text
+            auth: Authentication context
+            filters: Optional metadata filters for documents
+            k: Number of chunks to retrieve
+            min_score: Minimum similarity score
+            max_tokens: Maximum tokens for completion
+            temperature: Temperature for completion
+            use_reranking: Whether to use reranking
+            use_colpali: Whether to use colpali embedding
+            graph_name: Optional name of the graph to use for knowledge graph-enhanced retrieval
+            hop_depth: Number of relationship hops to traverse in the graph (1-3)
+            include_paths: Whether to include relationship paths in the response
+        """
+        if graph_name:
+            # Use knowledge graph enhanced retrieval via GraphService
+            return await self.graph_service.query_with_graph(
+                query=query,
+                graph_name=graph_name,
+                auth=auth,
+                document_service=self,
+                filters=filters,
+                k=k,
+                min_score=min_score,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                use_reranking=use_reranking,
+                use_colpali=use_colpali,
+                hop_depth=hop_depth,
+                include_paths=include_paths,
+            )
+        
+        # Standard retrieval without graph
         chunks = await self.retrieve_chunks(
             query, auth, filters, k, min_score, use_reranking, use_colpali
         )
         documents = await self._create_document_results(auth, chunks)
 
+        # Create augmented chunk contents
         chunk_contents = [chunk.augmented_content(documents[chunk.document_id]) for chunk in chunks]
         
         # Collect sources information
@@ -1165,6 +1214,36 @@ class DocumentService:
             
         logger.info(f"Created {len(chunk_objects_multivector)} chunk objects for multivector embedding")
         return chunk_objects_multivector
+
+    async def create_graph(
+        self,
+        name: str,
+        auth: AuthContext,
+        filters: Optional[Dict[str, Any]] = None,
+        documents: Optional[List[str]] = None,
+    ) -> Graph:
+        """Create a graph from documents.
+
+        This function processes documents matching filters or specific document IDs,
+        extracts entities and relationships from document chunks, and saves them as a graph.
+
+        Args:
+            name: Name of the graph to create
+            auth: Authentication context
+            filters: Optional metadata filters to determine which documents to include
+            documents: Optional list of specific document IDs to include
+
+        Returns:
+            Graph: The created graph
+        """
+        # Delegate to the GraphService
+        return await self.graph_service.create_graph(
+            name=name,
+            auth=auth,
+            document_service=self,
+            filters=filters,
+            documents=documents,
+        )
 
     def close(self):
         """Close all resources."""

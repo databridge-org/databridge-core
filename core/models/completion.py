@@ -17,6 +17,7 @@ class CompletionResponse(BaseModel):
     usage: Dict[str, int]
     finish_reason: Optional[str] = None
     sources: List[ChunkSource] = []
+    metadata: Optional[Dict] = None
 
 
 class CompletionRequest(BaseModel):

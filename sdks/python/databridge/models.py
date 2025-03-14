@@ -171,6 +171,7 @@ class CompletionResponse(BaseModel):
     sources: List[ChunkSource] = Field(
         default_factory=list, description="Sources of chunks used in the completion"
     )
+    metadata: Optional[Dict[str, Any]] = None
 
 
 class IngestTextRequest(BaseModel):

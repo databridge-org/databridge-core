@@ -3,6 +3,7 @@ from typing import List, Optional, Dict, Any
 
 from ..models.documents import Document
 from ..models.auth import AuthContext
+from ..models.graph import Graph
 
 
 class BaseDatabase(ABC):
@@ -125,5 +126,42 @@ class BaseDatabase(ABC):
 
         Returns:
             Optional[Dict[str, Any]]: Cache metadata if found, None otherwise
+        """
+        pass
+
+    @abstractmethod
+    async def store_graph(self, graph: Graph) -> bool:
+        """Store a graph.
+
+        Args:
+            graph: Graph to store
+
+        Returns:
+            bool: Whether the operation was successful
+        """
+        pass
+
+    @abstractmethod
+    async def get_graph(self, name: str, auth: AuthContext) -> Optional[Graph]:
+        """Get a graph by name.
+
+        Args:
+            name: Name of the graph
+            auth: Authentication context
+
+        Returns:
+            Optional[Graph]: Graph if found and accessible, None otherwise
+        """
+        pass
+
+    @abstractmethod
+    async def list_graphs(self, auth: AuthContext) -> List[Graph]:
+        """List all graphs the user has access to.
+
+        Args:
+            auth: Authentication context
+
+        Returns:
+            List[Graph]: List of graphs
         """
         pass

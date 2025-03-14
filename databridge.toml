@@ -16,11 +16,11 @@ model_name = "llama3.2-vision"
 default_max_tokens = "1000"
 default_temperature = 0.7
 # base_url = "http://ollama:11434"  # Just use the service name
-base_url = "http://localhost:11434" # Local configuration
+base_url = "http://localhost:11434"
 
 # [completion]
 # provider = "openai"
-# model_name = "gpt-4-turbo-preview"
+# model_name = "gpt-4o"
 # default_max_tokens = "1000"
 # default_temperature = 0.7
 
@@ -45,7 +45,6 @@ base_url = "http://localhost:11434" # Local configuration
 # model_name = "text-embedding-3-small"
 # dimensions = 1536
 # similarity_metric = "dotProduct"
-
 
 [parser]
 chunk_size = 1000
@@ -101,3 +100,7 @@ batch_size = 4096
 
 [databridge]
 enable_colpali = true
+
+[graph]
+provider = "ollama"
+model_name = "llama3.2"

@@ -64,6 +64,10 @@ class Settings(BaseSettings):
     RULES_MODEL: str
     RULES_BATCH_SIZE: int = 4096
 
+    # Graph configuration
+    GRAPH_PROVIDER: Literal["ollama", "openai"]
+    GRAPH_MODEL: str
+
     # Reranker configuration
     USE_RERANKING: bool
     RERANKER_PROVIDER: Optional[Literal["flag"]] = None
@@ -276,6 +280,12 @@ def get_settings() -> Settings:
         "ENABLE_COLPALI": config["databridge"]["enable_colpali"],
     }
 
+    # load graph config
+    graph_config = {
+        "GRAPH_PROVIDER": config["graph"]["provider"],
+        "GRAPH_MODEL": config["graph"]["model_name"],
+    }
+    
     settings_dict = dict(ChainMap(
         api_config,
         auth_config,
@@ -288,5 +298,7 @@ def get_settings() -> Settings:
         vector_store_config,
         rules_config,
         databridge_config,
+        graph_config,
     ))
+
     return Settings(**settings_dict)

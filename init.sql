@@ -68,3 +68,21 @@ CREATE OR REPLACE FUNCTION max_sim(document bit[], query bit[]) RETURNS double p
     )
     SELECT SUM(max_similarity) FROM max_similarities;
 $$ LANGUAGE SQL;
+
+-- Create graphs table for knowledge graph functionality
+CREATE TABLE IF NOT EXISTS graphs (
+    id VARCHAR PRIMARY KEY,
+    name VARCHAR UNIQUE,
+    entities JSONB DEFAULT '[]',
+    relationships JSONB DEFAULT '[]',
+    metadata JSONB DEFAULT '{}',
+    document_ids JSONB DEFAULT '[]',
+    filters JSONB DEFAULT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    owner JSONB DEFAULT '{}',
+    access_control JSONB DEFAULT '{"readers": [], "writers": [], "admins": []}'
+);
+
+-- Create index for graph name for faster lookups
+CREATE INDEX IF NOT EXISTS idx_graph_name ON graphs(name);
