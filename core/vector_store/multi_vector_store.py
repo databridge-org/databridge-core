@@ -132,7 +132,10 @@ class MultiVectorStore(BaseVectorStore):
                             SELECT unnest(document) AS document
                         ),
                         similarities AS (
-                            SELECT query_number, 1 - ((document <~> query) / bit_length(query)) AS similarity FROM queries CROSS JOIN documents
+                            SELECT 
+                                query_number, 
+                                1.0 - (bit_count(document # query)::float / greatest(bit_length(query), 1)::float) AS similarity
+                            FROM queries CROSS JOIN documents
                         ),
                         max_similarities AS (
                             SELECT MAX(similarity) AS max_similarity FROM similarities GROUP BY query_number

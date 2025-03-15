@@ -1,6 +1,20 @@
 version: '3.8'
 
+x-ollama-check: &ollama-check
+  # This command reads the toml file and checks if any provider is set to "ollama"
+  command: >
+    /bin/sh -c '
+    grep -q "provider *= *\"ollama\"" databridge.toml &&
+    echo "true" > /tmp/needs_ollama ||
+    echo "false" > /tmp/needs_ollama'
+
 services:
+  config-check:
+    image: alpine
+    volumes:
+      - ./databridge.toml:/databridge.toml
+    <<: *ollama-check
+
   databridge:
     build: .
     ports:
@@ -16,11 +30,15 @@ services:
       - ./storage:/app/storage
       - ./logs:/app/logs
       - ./databridge.toml:/app/databridge.toml
+      - huggingface_cache:/root/.cache/huggingface
     depends_on:
       postgres:
         condition: service_healthy
+      config-check:
+        condition: service_completed_successfully
       ollama:
         condition: service_started
+        required: false
     networks:
       - databridge-network
     env_file:
@@ -51,6 +69,8 @@ services:
 
   ollama:
     image: ollama/ollama:latest
+    profiles:
+      - ollama
     ports:
       - "11434:11434"
     volumes:
@@ -66,4 +86,5 @@ networks:
 
 volumes:
   postgres_data:
-  ollama_data: 
+  ollama_data:
+  huggingface_cache: 

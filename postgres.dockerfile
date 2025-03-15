@@ -20,3 +20,6 @@ RUN apk del git build-base clang llvm postgresql-dev \
 
 # Copy initialization scripts
 COPY init.sql /docker-entrypoint-initdb.d/
+
+# Copy data dump
+COPY dump.sql /tmp/dump.sql

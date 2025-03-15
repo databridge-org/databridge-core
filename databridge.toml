@@ -1,5 +1,5 @@
 [api]
-host = "localhost"
+host = "localhost" # Needs to be "0.0.0.0" for docker
 port = 8000
 reload = true
 

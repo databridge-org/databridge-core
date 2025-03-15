@@ -65,6 +65,10 @@ reload = false\n\
 \n\
 [auth]\n\
 jwt_algorithm = "HS256"\n\
+dev_mode = true\n\
+dev_entity_id = "dev_user"\n\
+dev_entity_type = "developer"\n\
+dev_permissions = ["read", "write", "admin"]\n\
 \n\
 [completion]\n\
 provider = "ollama"\n\
