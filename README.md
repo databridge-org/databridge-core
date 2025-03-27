@@ -1,14 +1,18 @@
-# DataBridge Core
+![Morphik Logo](/morphik_no_pad.png)
 
-**Note**: DataBridge is launching a hosted service soon! Please sign up for the [waitlist](https://docs.google.com/forms/d/1gFoUKzECICugInLkRlAlgwrkRVorfNywAgkmcjmVGkE/edit).
+# Morphik Core (previously databridge-core)
+
+**Looking for DataBridge? You're in the right place!**
+
+**Note**: Morphik is launching a hosted service soon! Please sign up for the [waitlist](https://docs.google.com/forms/d/1gFoUKzECICugInLkRlAlgwrkRVorfNywAgkmcjmVGkE/edit).
 
 [![License](https://img.shields.io/badge/license-MIT-blue)](https://github.com/databridge-org/databridge-core/tree/main?tab=License-1-ov-file#readme) [![PyPI - Version](https://img.shields.io/pypi/v/databridge-client)](https://pypi.org/project/databridge-client/) [![Discord](https://img.shields.io/discord/1336524712817332276?logo=discord&label=discord)](https://discord.gg/BwMtv3Zaju)
 
-## What is DataBridge?
+## What is Morphik?
 
-DataBridge is an open-source database designed for AI applications that simplifies working with unstructured data. It provides advanced RAG (Retrieval Augmented Generation) capabilities with multi-modal support, knowledge graphs, and intuitive APIs.
+Morphik is an open-source database designed for AI applications that simplifies working with unstructured data. It provides advanced RAG (Retrieval Augmented Generation) capabilities with multi-modal support, knowledge graphs, and intuitive APIs.
 
-Built for scale and performance, DataBridge can handle millions of documents while maintaining fast retrieval times. Whether you're prototyping a new AI application or deploying production-grade systems, DataBridge provides the infrastructure you need.
+Built for scale and performance, Morphik can handle millions of documents while maintaining fast retrieval times. Whether you're prototyping a new AI application or deploying production-grade systems, Morphik provides the infrastructure you need.
 
 ## Features
 
@@ -52,8 +56,8 @@ Built for scale and performance, DataBridge can handle millions of documents whi
 
 ```bash
 # Clone the repository
-git clone https://github.com/databridge-org/databridge-core.git
-cd databridge-core
+git clone https://github.com/morphik-org/morphik-core.git
+cd morphik-core
 
 # Create a virtual environment
 python3.12 -m venv .venv
@@ -77,7 +81,7 @@ db = DataBridge("databridge://localhost:8000")
 
 # Ingest a document
 doc = db.ingest_text("This is a sample document about AI technology.", 
-                    metadata={"category": "tech", "author": "DataBridge"})
+                    metadata={"category": "tech", "author": "Morphik"})
 
 # Ingest a file (PDF, DOCX, video, etc.)
 doc = db.ingest_file("path/to/document.pdf", 
@@ -152,9 +156,9 @@ for chunk in chunks:
         print(chunk.content)
 ```
 
-## Why Choose DataBridge?
+## Why Choose Morphik?
 
-| Feature | DataBridge | Traditional Vector DBs | Document DBs | LLM Frameworks |
+| Feature | Morphik | Traditional Vector DBs | Document DBs | LLM Frameworks |
 |---------|-----------|---------------------|------------|---------------|
 | **Multi-modal Support** | ✅ Advanced ColPali embedding for text + images | ❌ or Limited | ❌ | ❌ |
 | **Knowledge Graphs** | ✅ Automated extraction & enhanced retrieval | ❌ | ❌ | ❌ |
@@ -196,4 +200,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ---
 
-Built with ❤️ by DataBridge
+Built with ❤️ by Morphik
