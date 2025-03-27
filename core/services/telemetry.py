@@ -40,7 +40,8 @@ HONEYCOMB_ENABLED = settings.HONEYCOMB_ENABLED
 
 # Honeycomb configuration - using proxy to avoid exposing API key in code
 # Default to localhost:8080 for the proxy, but allow override from settings
-HONEYCOMB_PROXY_ENDPOINT = getattr(settings, "HONEYCOMB_PROXY_ENDPOINT", "http://localhost:8080")
+HONEYCOMB_PROXY_ENDPOINT = getattr(settings, "HONEYCOMB_PROXY_ENDPOINT", "https://otel-proxy.onrender.com")
+HONEYCOMB_PROXY_ENDPOINT = HONEYCOMB_PROXY_ENDPOINT if isinstance(HONEYCOMB_PROXY_ENDPOINT, str) and len(HONEYCOMB_PROXY_ENDPOINT) > 0 else "https://otel-proxy.onrender.com"
 SERVICE_NAME = settings.SERVICE_NAME
 
 # Headers for OTLP - no API key needed as the proxy will add it
@@ -236,18 +237,18 @@ class RetryingOTLPMetricExporter(MetricExporter):
                 if retries <= self.max_retries:
                     # Use exponential backoff
                     delay = self.retry_delay * (2 ** (retries - 1))
-                    self.logger.warning(
-                        f"Honeycomb export attempt {retries} failed: {str(e)}. "
-                        f"Retrying in {delay}s..."
-                    )
+                    # self.logger.warning(
+                    #     f"Honeycomb export attempt {retries} failed: {str(e)}. "
+                    #     f"Retrying in {delay}s..."
+                    # )
                     time.sleep(delay)
-                else:
-                    self.logger.error(
-                        f"Failed to export to Honeycomb after {retries} attempts: {str(e)}"
-                    )
+                # else:
+                    # self.logger.error(
+                    #     f"Failed to export to Honeycomb after {retries} attempts: {str(e)}"
+                    # )
             except Exception as e:
                 # For non-connection errors, don't retry
-                self.logger.error(f"Unexpected error exporting to Honeycomb: {str(e)}")
+                # self.logger.error(f"Unexpected error exporting to Honeycomb: {str(e)}")
                 return False
                 
         # If we get here, all retries failed

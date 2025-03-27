@@ -237,7 +237,7 @@ def get_settings() -> Settings:
         )
 
     # load storage config
-    storage_config = {"STORAGE_PROVIDER": config["storage"]["provider"]}
+    storage_config = {"STORAGE_PROVIDER": config["storage"]["provider"], "STORAGE_PATH": config["storage"]["storage_path"]}
     match storage_config["STORAGE_PROVIDER"]:
         case "local":
             storage_config.update({"STORAGE_PATH": config["storage"]["storage_path"]})

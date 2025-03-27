@@ -74,7 +74,7 @@ def create_s3_bucket(bucket_name, region=DEFAULT_REGION):
 
     aws_access_key = os.getenv("AWS_ACCESS_KEY")
     aws_secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
-    region = os.getenv("AWS_REGION") if os.getenv("AWS_REGION") else region
+    region = os.getenv("AWS_REGION") or region
 
     if not aws_access_key or not aws_secret_key:
         LOGGER.error("AWS credentials not found in environment variables.")
@@ -112,9 +112,9 @@ def bucket_exists(s3_client, bucket_name):
         return True
     except botocore.exceptions.ClientError as e:
         error_code = int(e.response["Error"]["Code"])
-        if error_code == 404:
+        if error_code in [404, 403]:
             return False
-        raise
+        # raise e
 
 
 def setup_mongodb():
@@ -180,178 +180,6 @@ def setup_mongodb():
         LOGGER.info("MongoDB connection closed.")
 
 
-def setup_postgres():
-    """
-    Set up PostgreSQL database and tables with proper indexes, including initializing a
-    separate multi-vector embeddings table and its associated similarity function without
-    interfering with the existing vector embeddings table.
-    """
-    import asyncio
-
-    from sqlalchemy import text
-    from sqlalchemy.ext.asyncio import create_async_engine
-
-    # Load PostgreSQL URI from .env file
-    postgres_uri = os.getenv("POSTGRES_URI")
-    if not postgres_uri:
-        raise ValueError("POSTGRES_URI not found in .env file.")
-
-    # Check if pgvector is installed when on macOS
-    if platform.system() == "Darwin":
-        try:
-            # Check if postgresql is installed via homebrew
-            result = subprocess.run(
-                ["brew", "list", "postgresql@14"], capture_output=True, text=True
-            )
-            if result.returncode != 0:
-                LOGGER.error(
-                    "PostgreSQL not found. Please install it with: brew install postgresql@14"
-                )
-                raise RuntimeError("PostgreSQL not installed")
-
-            # Check if pgvector is installed
-            result = subprocess.run(["brew", "list", "pgvector"], capture_output=True, text=True)
-            if result.returncode != 0:
-                LOGGER.error(
-                    "\nError: pgvector extension not found. Please install it with:\n"
-                    "brew install pgvector\n"
-                    "brew services stop postgresql@14\n"
-                    "brew services start postgresql@14\n"
-                )
-                raise RuntimeError("pgvector not installed")
-        except FileNotFoundError:
-            LOGGER.error("Homebrew not found. Please install it from https://brew.sh")
-            raise
-
-    async def _setup_postgres():
-        try:
-            # Create async engine
-            engine = create_async_engine(postgres_uri)
-
-            async with engine.begin() as conn:
-                try:
-                    # Enable pgvector extension
-                    await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-                    LOGGER.info("Enabled pgvector extension")
-                except Exception as e:
-                    if "could not open extension control file" in str(e):
-                        LOGGER.error(
-                            "\nError: pgvector extension not found. Please install it:\n"
-                            "- On macOS: brew install pgvector\n"
-                            "- On Ubuntu: sudo apt install postgresql-14-pgvector\n"
-                            "- On other systems: check https://github.com/pgvector/pgvector#installation\n"
-                        )
-                    raise
-
-                # Import and create all base tables
-                from core.database.postgres_database import Base
-
-                # Create regular tables first
-                await conn.run_sync(Base.metadata.create_all)
-                LOGGER.info("Created base PostgreSQL tables")
-
-                # Create caches table
-                create_caches_table = """
-                CREATE TABLE IF NOT EXISTS caches (
-                    name TEXT PRIMARY KEY,
-                    metadata JSON NOT NULL,
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-                )
-                """
-                await conn.execute(text(create_caches_table))
-                LOGGER.info("Created caches table")
-
-                # Get vector dimensions from config
-                dimensions = CONFIG["embedding"]["dimensions"]
-
-                # Drop existing vector index if it exists
-                drop_index_sql = """
-                DROP INDEX IF EXISTS vector_idx;
-                """
-                await conn.execute(text(drop_index_sql))
-
-                # Drop existing vector embeddings table if it exists
-                drop_table_sql = """
-                DROP TABLE IF EXISTS vector_embeddings;
-                """
-                await conn.execute(text(drop_table_sql))
-
-                # Create vector embeddings table with proper vector column
-                create_table_sql = f"""
-                CREATE TABLE vector_embeddings (
-                    id SERIAL PRIMARY KEY,
-                    document_id VARCHAR(255),
-                    chunk_number INTEGER,
-                    content TEXT,
-                    chunk_metadata TEXT,
-                    embedding vector({dimensions}),
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-                );
-                """
-                await conn.execute(text(create_table_sql))
-                LOGGER.info("Created vector_embeddings table with vector column")
-
-                # Create the vector index
-                index_sql = """
-                CREATE INDEX vector_idx
-                ON vector_embeddings USING ivfflat (embedding vector_l2_ops)
-                WITH (lists = 100);
-                """
-                await conn.execute(text(index_sql))
-                LOGGER.info("Created IVFFlat index on vector_embeddings")
-
-                # Initialize multi-vector embeddings table and associated similarity function
-                drop_multi_vector_sql = """
-                DROP TABLE IF EXISTS multi_vector_embeddings;
-                """
-                await conn.execute(text(drop_multi_vector_sql))
-                LOGGER.info("Dropped existing multi_vector_embeddings table (if any)")
-
-                create_multi_vector_sql = """
-                CREATE TABLE multi_vector_embeddings (
-                    id BIGSERIAL PRIMARY KEY,
-                    embeddings BIT(128)[]
-                );
-                """
-                await conn.execute(text(create_multi_vector_sql))
-                LOGGER.info(
-                    "Created multi_vector_embeddings table with BIT(128)[] embeddings column"
-                )
-
-                create_function_sql = """
-                CREATE OR REPLACE FUNCTION max_sim(document_bits BIT[], query_bits BIT[]) RETURNS double precision AS $$
-                    WITH queries AS (
-                        SELECT row_number() OVER () AS query_number, * FROM (SELECT unnest(query_bits) AS query) AS foo
-                    ),
-                    documents AS (
-                        SELECT unnest(document_bits) AS document
-                    ),
-                    similarities AS (
-                        SELECT 
-                            query_number, 
-                            1.0 - (bit_count(document # query)::float / greatest(bit_length(query), 1)::float) AS similarity 
-                        FROM queries CROSS JOIN documents
-                    ),
-                    max_similarities AS (
-                        SELECT MAX(similarity) AS max_similarity FROM similarities GROUP BY query_number
-                    )
-                    SELECT SUM(max_similarity) FROM max_similarities
-                $$ LANGUAGE SQL;
-                """
-                await conn.execute(text(create_function_sql))
-                LOGGER.info("Created function max_sim for multi-vector similarity computation")
-
-            await engine.dispose()
-            LOGGER.info("PostgreSQL setup completed successfully")
-
-        except Exception as e:
-            LOGGER.error(f"Failed to setup PostgreSQL: {e}")
-            raise
-
-    asyncio.run(_setup_postgres())
-
-
 def setup():
     # Setup S3 if configured
     if STORAGE_PROVIDER == "aws-s3":
@@ -366,9 +194,7 @@ def setup():
             setup_mongodb()
             LOGGER.info("MongoDB setup completed.")
         case "postgres":
-            LOGGER.info("Setting up PostgreSQL...")
-            setup_postgres()
-            LOGGER.info("PostgreSQL setup completed.")
+            LOGGER.info("Postgres is setup on database intialization - nothing to do here!")
         case _:
             LOGGER.error(f"Unsupported database provider: {DATABASE_PROVIDER}")
             raise ValueError(f"Unsupported database provider: {DATABASE_PROVIDER}")
