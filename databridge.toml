@@ -76,14 +76,15 @@ device = "mps"
 # [reranker]
 # use_reranker = false
 
-[storage]
-provider = "local"
-storage_path = "./storage"
-
 # [storage]
-# provider = "aws-s3"
-# region = "us-east-2"
-# bucket_name = "databridge-s3-storage"
+# provider = "local"
+# storage_path = "./storage"
+
+[storage]
+provider = "aws-s3"
+region = "us-east-2"
+bucket_name = "morphik-storage"
+storage_path = "morphik-storage"
 
 [vector_store]
 provider = "pgvector"
