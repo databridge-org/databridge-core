@@ -1,28 +1,28 @@
 [api]
-host = "localhost" # Needs to be "0.0.0.0" for docker
+host = "127.0.0.1" # Needs to be "0.0.0.0" for docker
 port = 8000
 reload = true
 
 [auth]
 jwt_algorithm = "HS256"
-dev_mode = true  # Enabled by default for easier local development
+dev_mode = false  # Enabled by default for easier local development
 dev_entity_id = "dev_user"  # Default dev user ID
 dev_entity_type = "developer"  # Default dev entity type
 dev_permissions = ["read", "write", "admin"]  # Default dev permissions
 
+#[completion]
+#provider = "ollama"
+#model_name = "llama3.2-vision"
+#default_max_tokens = "1000"
+#default_temperature = 0.7
+# base_url = "http://ollama:11434"  # Just use the service name
+#base_url = "http://localhost:11434"
+
 [completion]
-provider = "ollama"
-model_name = "llama3.2-vision"
+provider = "openai"
+model_name = "gpt-4o"
 default_max_tokens = "1000"
 default_temperature = 0.7
-# base_url = "http://ollama:11434"  # Just use the service name
-base_url = "http://localhost:11434"
-
-# [completion]
-# provider = "openai"
-# model_name = "gpt-4o"
-# default_max_tokens = "1000"
-# default_temperature = 0.7
 
 [database]
 provider = "postgres"
@@ -32,19 +32,19 @@ provider = "postgres"
 # database_name = "databridge"
 # collection_name = "documents"
 
-[embedding]
-provider = "ollama"
-model_name = "nomic-embed-text"
-dimensions = 768
-similarity_metric = "cosine"
+#[embedding]
+#provider = "ollama"
+#model_name = "nomic-embed-text"
+#dimensions = 768
+#similarity_metric = "cosine"
 # base_url = "http://ollama:11434"  # Just use the service name
-base_url = "http://localhost:11434" # Local configuration
+#base_url = "http://localhost:11434" # Local configuration
 
-# [embedding]
-# provider = "openai"
-# model_name = "text-embedding-3-small"
-# dimensions = 1536
-# similarity_metric = "dotProduct"
+[embedding]
+provider = "openai"
+model_name = "text-embedding-3-small"
+dimensions = 1536
+similarity_metric = "dotProduct"
 
 [parser]
 chunk_size = 1000
@@ -52,17 +52,17 @@ chunk_overlap = 200
 use_unstructured_api = false
 use_contextual_chunking = false
 
-[parser.vision]
-provider = "ollama"
-model_name = "llama3.2-vision"
-frame_sample_rate = -1  # Set to -1 to disable frame captioning
-base_url = "http://localhost:11434"  # Only used for ollama
+#[parser.vision]
+#provider = "ollama"
+#model_name = "llama3.2-vision"
+#frame_sample_rate = -1  # Set to -1 to disable frame captioning
+#base_url = "http://localhost:11434"  # Only used for ollama
 # base_url = "http://ollama:11434"  # Use if using via docker
 
-# [parser.vision]
-# provider = "openai"
-# model_name = "gpt-4o-mini"
-# frame_sample_rate = -1 # Set to -1 to disable frame captioning
+[parser.vision]
+provider = "openai"
+model_name = "gpt-4o-mini"
+frame_sample_rate = -1 # Set to -1 to disable frame captioning
 
 [reranker]
 use_reranker = true
@@ -71,7 +71,7 @@ model_name = "BAAI/bge-reranker-large"
 query_max_length = 256
 passage_max_length = 512
 use_fp16 = true
-device = "mps"
+device = "cpu"
 
 # [reranker]
 # use_reranker = false
@@ -94,18 +94,23 @@ provider = "pgvector"
 # database_name = "databridge"
 # collection_name = "document_chunks"
 
+#[rules]
+#provider = "ollama"
+#model_name = "llama3.2"
+#batch_size = 4096
+
 [rules]
-provider = "ollama"
-model_name = "llama3.2"
+provider = "openai"
+model_name = "gpt-4o"
 batch_size = 4096
 
 [databridge]
 enable_colpali = true
-mode = "self_hosted"  # "cloud" or "self_hosted"
+mode = "cloud"  # "cloud" or "self_hosted"
 
 [graph]
-provider = "ollama"
-model_name = "llama3.2"
+provider = "openai"
+model_name = "gpt-4o-mini"
 
 # [graph]
 # provider = "openai"
@@ -116,7 +121,7 @@ enabled = true
 honeycomb_enabled = true
 honeycomb_endpoint = "https://api.honeycomb.io"
 honeycomb_proxy_endpoint = "https://otel-proxy.onrender.com"
-service_name = "databridge-core"
+service_name = "databridge-core-hosted"
 otlp_timeout = 10
 otlp_max_retries = 3
 otlp_retry_delay = 1
