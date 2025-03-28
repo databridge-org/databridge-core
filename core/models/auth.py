@@ -16,3 +16,4 @@ class AuthContext(BaseModel):
     app_id: Optional[str] = None  # uuid, only for developers
     # TODO: remove permissions, not required here.
     permissions: Set[str] = {"read"}
+    user_id: Optional[str] = None  # ID of the user who owns the app/entity

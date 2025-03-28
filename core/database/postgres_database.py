@@ -494,6 +494,15 @@ class PostgresDatabase(BaseDatabase):
         if auth.entity_type == "DEVELOPER" and auth.app_id:
             # Add app-specific access for developers
             filters.append(f"access_control->'app_access' ? '{auth.app_id}'")
+            
+        # Add user_id filter in cloud mode
+        if auth.user_id:
+            from core.config import get_settings
+            settings = get_settings()
+            
+            if settings.MODE == "cloud":
+                # Filter by user_id in access_control
+                filters.append(f"access_control->>'user_id' = '{auth.user_id}'")
 
         return " OR ".join(filters)
 

@@ -101,6 +101,7 @@ batch_size = 4096
 
 [databridge]
 enable_colpali = true
+mode = "self_hosted"  # "cloud" or "self_hosted"
 
 [graph]
 provider = "ollama"

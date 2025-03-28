@@ -57,3 +57,11 @@ class BatchIngestResponse(BaseModel):
     """Response model for batch ingestion"""
     documents: List[Document]
     errors: List[Dict[str, str]]
+
+
+class GenerateUriRequest(BaseModel):
+    """Request model for generating a cloud URI"""
+    app_id: str = Field(..., description="ID of the application")
+    name: str = Field(..., description="Name of the application")
+    user_id: str = Field(..., description="ID of the user who owns the app")
+    expiry_days: int = Field(default=30, description="Number of days until the token expires")

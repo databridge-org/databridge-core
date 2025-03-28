@@ -210,7 +210,7 @@ class PGVectorStore(BaseVectorStore):
                 # Build query to find all matching chunks in a single query
                 query = select(VectorEmbedding).where(or_condition)
                 
-                logger.info(f"Batch retrieving {len(chunk_identifiers)} chunks with a single query")
+                logger.debug(f"Batch retrieving {len(chunk_identifiers)} chunks with a single query")
                 
                 # Execute query
                 result = await session.execute(query)
@@ -235,7 +235,7 @@ class PGVectorStore(BaseVectorStore):
                     )
                     chunks.append(chunk)
                 
-                logger.info(f"Found {len(chunks)} chunks in batch retrieval")
+                logger.debug(f"Found {len(chunks)} chunks in batch retrieval")
                 return chunks
                 
         except Exception as e:
