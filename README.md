@@ -66,7 +66,12 @@ source .venv/bin/activate  # Linux/macOS
 # Install dependencies
 pip install -r requirements.txt
 
+# Install the Python SDK
+cd sdks/python
+pip install .
+
 # Configure and start the server
+cd ../../
 python quick_setup.py
 python start_server.py
 ```
