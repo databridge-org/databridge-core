@@ -98,11 +98,17 @@ const GraphSection: React.FC<GraphSectionProps> = ({ apiBaseUrl }) => {
       color: entityTypeColors[entity.type.toLowerCase()] || entityTypeColors.default
     }));
 
-    const links = graph.relationships.map(rel => ({
-      source: rel.source_id,
-      target: rel.target_id,
-      type: rel.type
-    }));
+    // Create a Set of all entity IDs for faster lookups
+    const nodeIdSet = new Set(graph.entities.map(entity => entity.id));
+
+    // Filter relationships to only include those where both source and target nodes exist
+    const links = graph.relationships
+      .filter(rel => nodeIdSet.has(rel.source_id) && nodeIdSet.has(rel.target_id))
+      .map(rel => ({
+        source: rel.source_id,
+        target: rel.target_id,
+        type: rel.type
+      }));
 
     return { nodes, links };
   }, []);
@@ -251,7 +257,7 @@ const GraphSection: React.FC<GraphSectionProps> = ({ apiBaseUrl }) => {
         initializeGraph();
       }, 100);
     }
-  }, [selectedGraph, activeTab, initializeGraph]);
+  }, [selectedGraph, activeTab, initializeGraph, showNodeLabels, showLinkLabels]);
 
   // Handle tab change
   const handleTabChange = (value: string) => {

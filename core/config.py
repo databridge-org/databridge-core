@@ -67,6 +67,7 @@ class Settings(BaseSettings):
     # Graph configuration
     GRAPH_PROVIDER: Literal["ollama", "openai"]
     GRAPH_MODEL: str
+    ENABLE_ENTITY_RESOLUTION: bool = True
 
     # Reranker configuration
     USE_RERANKING: bool
@@ -301,6 +302,7 @@ def get_settings() -> Settings:
     graph_config = {
         "GRAPH_PROVIDER": config["graph"]["provider"],
         "GRAPH_MODEL": config["graph"]["model_name"],
+        "ENABLE_ENTITY_RESOLUTION": config["graph"].get("enable_entity_resolution", True),
     }
     
     # load telemetry config

@@ -12,6 +12,7 @@ from core.completion.base_completion import BaseCompletionModel
 from core.database.base_database import BaseDatabase
 from core.models.documents import Document, ChunkResult
 from core.config import get_settings
+from core.services.entity_resolution import EntityResolver
 from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,7 @@ class GraphService:
         self.db = db
         self.embedding_model = embedding_model
         self.completion_model = completion_model
+        self.entity_resolver = EntityResolver()
 
     async def create_graph(
         self,
@@ -140,6 +142,8 @@ class GraphService:
         entities = {}
         # List to collect all relationships
         relationships = []
+        # List to collect all extracted entities for resolution
+        all_entities = []
 
         # Collect all chunk sources from documents.
         chunk_sources = [
@@ -162,11 +166,12 @@ class GraphService:
                     chunk.chunk_number
                 )
 
-                # Add entities to the collection, avoiding duplicates
+                # Add entities to the collection, avoiding duplicates based on exact label match
                 for entity in chunk_entities:
                     if entity.label not in entities:
                         # For new entities, initialize chunk_sources with the current chunk
                         entities[entity.label] = entity
+                        all_entities.append(entity)
                     else:
                         # If entity already exists, add this chunk source if not already present
                         existing_entity = entities[entity.label]
@@ -197,6 +202,58 @@ class GraphService:
                 logger.error(f"Fatal error processing chunk {chunk.chunk_number} in document {chunk.document_id}: {e}")
                 raise
 
+        # Check if entity resolution is enabled in settings
+        settings = get_settings()
+        
+        # Resolve entities to handle variations like "Trump" vs "Donald J Trump"
+        if settings.ENABLE_ENTITY_RESOLUTION:
+            logger.info("Resolving %d entities using LLM...", len(all_entities))
+            resolved_entities, entity_mapping = await self.entity_resolver.resolve_entities(all_entities)
+            logger.info("Entity resolution completed successfully")
+        else:
+            logger.info("Entity resolution is disabled in settings.")
+            # Return identity mapping (each entity maps to itself)
+            entity_mapping = {entity.label: entity.label for entity in all_entities}
+            resolved_entities = all_entities
+        
+        if entity_mapping:
+            logger.info("Entity resolution complete. Found %d mappings.", len(entity_mapping))
+            # Create a new entities dictionary with resolved entities
+            resolved_entities_dict = {}
+            # Build new entities dictionary with canonical labels
+            for entity in resolved_entities:
+                resolved_entities_dict[entity.label] = entity
+            # Update relationships to use canonical entity labels
+            updated_relationships = []
+            for relationship in relationships:
+                source_entity = None
+                target_entity = None
+                # Find source and target entities by ID
+                for entity in all_entities:
+                    if entity.id == relationship.source_id:
+                        source_entity = entity
+                    elif entity.id == relationship.target_id:
+                        target_entity = entity
+                if source_entity and target_entity:
+                    # Get canonical labels
+                    source_canonical = entity_mapping.get(source_entity.label, source_entity.label)
+                    target_canonical = entity_mapping.get(target_entity.label, target_entity.label)
+                    # Get canonical entities
+                    canonical_source = resolved_entities_dict.get(source_canonical)
+                    canonical_target = resolved_entities_dict.get(target_canonical)
+                    if canonical_source and canonical_target:
+                        # Update relationship to point to canonical entities
+                        relationship.source_id = canonical_source.id
+                        relationship.target_id = canonical_target.id
+                        updated_relationships.append(relationship)
+                    else:
+                        # Skip relationships that can't be properly mapped
+                        logger.warning("Skipping relationship between '%s' and '%s' - canonical entities not found", source_entity.label, target_entity.label)
+                else:
+                    # Keep relationship as is if we can't find the entities
+                    updated_relationships.append(relationship)
+            return resolved_entities_dict, updated_relationships
+        # If no entity resolution occurred, return original entities and relationships
         return entities, relationships
 
     async def extract_entities_from_text(
@@ -328,7 +385,7 @@ class GraphService:
                 result = response.json()
 
                 # Log the raw response for debugging
-                logger.info(f"Raw Ollama response for entity extraction: {result['message']['content']}")
+                logger.debug(f"Raw Ollama response for entity extraction: {result['message']['content']}")
 
                 # Parse the JSON response - Pydantic will handle validation
                 extraction_result = ExtractionResult.model_validate_json(result["message"]["content"])
@@ -459,14 +516,36 @@ class GraphService:
             # Find similar entities using embedding similarity
             top_entities = await self._find_similar_entities(query, graph.entities, k)
         else:
-            # Use extracted entities directly
-            entity_map = {entity.label.lower(): entity for entity in graph.entities}
+            # Use entity resolution to handle variants of the same entity
+            settings = get_settings()
+            
+            # First, create combined list of query entities and graph entities for resolution
+            combined_entities = query_entities + graph.entities
+            
+            # Resolve entities to identify variants if enabled
+            if settings.ENABLE_ENTITY_RESOLUTION:
+                logger.info(f"Resolving {len(combined_entities)} entities from query and graph...")
+                resolved_entities, entity_mapping = await self.entity_resolver.resolve_entities(combined_entities)
+            else:
+                logger.info("Entity resolution is disabled in settings.")
+                # Return identity mapping (each entity maps to itself)
+                entity_mapping = {entity.label: entity.label for entity in combined_entities}
+                resolved_entities = combined_entities
+            
+            # Create a mapping of resolved entity labels to graph entities
+            entity_map = {}
+            for entity in graph.entities:
+                # Get canonical form for this entity
+                canonical_label = entity_mapping.get(entity.label, entity.label)
+                entity_map[canonical_label.lower()] = entity
+            
             matched_entities = []
-
-            # Match extracted entities with graph entities
+            # Match extracted entities with graph entities using canonical labels
             for query_entity in query_entities:
-                if query_entity.label.lower() in entity_map:
-                    matched_entities.append(entity_map[query_entity.label.lower()])
+                # Get canonical form for this query entity
+                canonical_query = entity_mapping.get(query_entity.label, query_entity.label)
+                if canonical_query.lower() in entity_map:
+                    matched_entities.append(entity_map[canonical_query.lower()])
 
             # If no matches, fallback to embedding similarity
             if matched_entities:
