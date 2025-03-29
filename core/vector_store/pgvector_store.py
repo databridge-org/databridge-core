@@ -16,6 +16,8 @@ Base = declarative_base()
 class Vector(UserDefinedType):
     """Custom type for pgvector vectors."""
 
+    cache_ok = True  # Enable caching for better performance
+
     def get_col_spec(self, **kw):
         return "vector"
 

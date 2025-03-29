@@ -289,11 +289,21 @@ class DocumentService:
         chunks = await self.retrieve_chunks(
             query, auth, filters, k, min_score, use_reranking, use_colpali
         )
-        documents = await self._create_document_results(auth, chunks)
+        video_chunks: List[ChunkResult] = []
+        non_video_chunks: List[ChunkResult] = []
+
+        for chunk in chunks:
+            if "timestamp" in chunk.metadata:
+                video_chunks.append(chunk)
+            else:
+                non_video_chunks.append(chunk)
+        video_documents = await self._create_document_results(auth, video_chunks)
 
         # Create augmented chunk contents
-        chunk_contents = [chunk.augmented_content(documents[chunk.document_id]) for chunk in chunks]
-        
+        video_chunk_contents = [chunk.augmented_content(video_documents[chunk.document_id]) for chunk in video_chunks]
+
+        chunk_contents = [chunk.content for chunk in non_video_chunks] + video_chunk_contents
+
         # Collect sources information
         sources = [
             ChunkSource(document_id=chunk.document_id, chunk_number=chunk.chunk_number, score=chunk.score)
@@ -309,10 +319,10 @@ class DocumentService:
         )
 
         response = await self.completion_model.complete(request)
-        
+
         # Add sources information at the document service level
         response.sources = sources
-        
+
         return response
 
     async def ingest_text(
@@ -724,32 +734,50 @@ class DocumentService:
             if not await self.db.store_document(doc):
                 raise Exception("Failed to store document metadata")
             logger.debug("Stored document metadata in database")
-            
+
         logger.debug(f"Chunk IDs stored: {doc.chunk_ids}")
         return doc.chunk_ids
 
     async def _create_chunk_results(
         self, auth: AuthContext, chunks: List[DocumentChunk]
     ) -> List[ChunkResult]:
-        """Create ChunkResult objects with document metadata."""
+        """Create ChunkResult objects with document metadata using batch operations."""        
+        if not chunks:
+            return []
+
+        # Step 1: Collect unique document IDs
+        doc_ids = list({chunk.document_id for chunk in chunks})
+
+        # Step 2: Batch fetch documents in a single query
+        documents = await self.db.get_documents_by_id(doc_ids, auth)
+
+        # Create a lookup map for faster access
+        doc_map = {doc.external_id: doc for doc in documents}
+
+        # Step 3: Prepare download URLs for documents with storage info
+        storage_ops = []
+        for doc in documents:
+            if doc.storage_info:
+                storage_ops.append((doc.external_id, doc.storage_info))
+
+        # Step 4: Batch generate URLs if needed
+        url_map = {}
+        if storage_ops:
+            # Process in parallel if possible, or sequentially
+            for doc_id, storage_info in storage_ops:
+                url_map[doc_id] = await self.storage.get_download_url(
+                    storage_info["bucket"], storage_info["key"]
+                )
+
+        # Step 5: Create results
         results = []
         for chunk in chunks:
-            # Get document metadata
-            doc = await self.db.get_document(chunk.document_id, auth)
+            doc = doc_map.get(chunk.document_id)
             if not doc:
                 logger.warning(f"Document {chunk.document_id} not found")
                 continue
-            logger.debug(f"Retrieved metadata for document {chunk.document_id}")
-
-            # Generate download URL if needed
-            download_url = None
-            if doc.storage_info:
-                download_url = await self.storage.get_download_url(
-                    doc.storage_info["bucket"], doc.storage_info["key"]
-                )
-                logger.debug(f"Generated download URL for document {chunk.document_id}")
-
-            metadata = doc.metadata
+            
+            metadata = doc.metadata.copy()
             metadata["is_image"] = chunk.metadata.get("is_image", False)
             results.append(
                 ChunkResult(
@@ -760,18 +788,20 @@ class DocumentService:
                     metadata=metadata,
                     content_type=doc.content_type,
                     filename=doc.filename,
-                    download_url=download_url,
+                    download_url=url_map.get(chunk.document_id),
                 )
             )
 
-        logger.info(f"Created {len(results)} chunk results")
         return results
 
     async def _create_document_results(
         self, auth: AuthContext, chunks: List[ChunkResult]
     ) -> Dict[str, DocumentResult]:
-        """Group chunks by document and create DocumentResult objects."""
-        # Group chunks by document and get highest scoring chunk per doc
+        """Group chunks by document and create DocumentResult objects using batch operations."""        
+        if not chunks:
+            return {}
+            
+        # Step 1: Group chunks by document and get highest scoring chunk per doc
         doc_chunks: Dict[str, ChunkResult] = {}
         for chunk in chunks:
             if (
@@ -780,25 +810,41 @@ class DocumentService:
             ):
                 doc_chunks[chunk.document_id] = chunk
         logger.info(f"Grouped chunks into {len(doc_chunks)} documents")
-        logger.debug(f"Document chunks: {doc_chunks}")
+        
+        # Step 2: Batch fetch documents in a single query
+        doc_ids = list(doc_chunks.keys())
+        documents = await self.db.get_documents_by_id(doc_ids, auth)
+        # Create a lookup map for faster access
+        doc_map = {doc.external_id: doc for doc in documents}
+
+        # Step 3: Prepare storage URLs to be generated
+        storage_ops = []
+        for doc_id, doc in doc_map.items():
+            if doc.content_type != "text/plain" and doc.storage_info:
+                storage_ops.append((doc_id, doc.storage_info))
+        
+        # Step 4: Batch generate URLs if needed
+        url_map = {}
+        if storage_ops:
+            # Process URLs
+            for doc_id, storage_info in storage_ops:
+                url_map[doc_id] = await self.storage.get_download_url(
+                    storage_info["bucket"], storage_info["key"]
+                )
+        
+        # Step 5: Create results
         results = {}
         for doc_id, chunk in doc_chunks.items():
-            # Get document metadata
-            doc = await self.db.get_document(doc_id, auth)
+            doc = doc_map.get(doc_id)
             if not doc:
                 logger.warning(f"Document {doc_id} not found")
                 continue
-            logger.info(f"Retrieved metadata for document {doc_id}")
-
+            
             # Create DocumentContent based on content type
             if doc.content_type == "text/plain":
                 content = DocumentContent(type="string", value=chunk.content, filename=None)
-                logger.debug(f"Created text content for document {doc_id}")
             else:
-                # Generate download URL for file types
-                download_url = await self.storage.get_download_url(
-                    doc.storage_info["bucket"], doc.storage_info["key"]
-                )
+                download_url = url_map.get(doc_id)
                 content = DocumentContent(type="url", value=download_url, filename=doc.filename)
                 logger.debug(f"Created URL content for document {doc_id}")
             results[doc_id] = DocumentResult(

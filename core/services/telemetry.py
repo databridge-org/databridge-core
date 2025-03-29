@@ -296,18 +296,18 @@ class RetryingOTLPSpanExporter:
                 if retries <= self.max_retries:
                     # Use exponential backoff
                     delay = self.retry_delay * (2 ** (retries - 1))
-                    self.logger.warning(
+                    self.logger.debug(
                         f"Honeycomb trace export attempt {retries} failed: {str(e)}. "
                         f"Retrying in {delay}s..."
                     )
                     time.sleep(delay)
                 else:
-                    self.logger.error(
+                    self.logger.debug(
                         f"Failed to export traces to Honeycomb after {retries} attempts: {str(e)}"
                     )
             except Exception as e:
                 # For non-connection errors, don't retry
-                self.logger.error(f"Unexpected error exporting traces to Honeycomb: {str(e)}")
+                self.logger.debug(f"Unexpected error exporting traces to Honeycomb: {str(e)}")
                 return False
                 
         # If we get here, all retries failed
@@ -322,7 +322,7 @@ class RetryingOTLPSpanExporter:
         try:
             return self.exporter.force_flush()
         except Exception as e:
-            self.logger.error(f"Error during trace force_flush: {str(e)}")
+            self.logger.debug(f"Error during trace force_flush: {str(e)}")
             return False
 
 
@@ -426,7 +426,7 @@ class TelemetryService:
                         export_timeout_millis=OTLP_TIMEOUT * 1000,
                     )
                 )
-                print(f"Successfully configured Honeycomb metrics exporter to {OTLP_METRICS_ENDPOINT}")
+                # print(f"Successfully configured Honeycomb metrics exporter to {OTLP_METRICS_ENDPOINT}")
             except Exception as e:
                 print(f"Failed to configure Honeycomb metrics exporter: {str(e)}")
 
